@@ -10,6 +10,7 @@ ALLOWLIST_PATH = BASE_DIR / "artist_allowlist.json"
 ARCHIVE_PATH = BASE_DIR / "downloaded.txt"  # yt-dlp native download archive
 LOG_DIR = BASE_DIR / "logs"
 LOCAL_DB_PATH = BASE_DIR / "musicbrainz_cache.db"
+COOKIES_PATH = BASE_DIR / "cookies.txt"     # optional: exported YouTube cookies
 
 # ---------- Download ----------
 AUDIO_FORMAT = "mp3"
