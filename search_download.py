@@ -1,0 +1,74 @@
+"""Search YouTube and download singles via yt-dlp.
+
+Uses keyword queries (SEARCH_QUERIES) and artist-name queries (ARTIST_QUERIES).
+Filters: duration range, playlist/compilation exclusion, download archive.
+"""
+import random
+import subprocess
+import time
+from config import (SEARCH_QUERIES, ARTIST_QUERIES, STAGING_DIR, ARCHIVE_PATH,
+                    AUDIO_FORMAT, AUDIO_QUALITY, MIN_DURATION, MAX_DURATION,
+                    MAX_PLAYLIST_ITEMS, SEARCH_SLEEP, DRY_RUN)
+
+STAGING_DIR.mkdir(parents=True, exist_ok=True)
+ARCHIVE_PATH.touch(exist_ok=True)
+
+COMMON_FLAGS = [
+    "--extract-audio", f"--audio-format={AUDIO_FORMAT}",
+    f"--audio-quality={AUDIO_QUALITY}",
+    "--embed-thumbnail", "--add-metadata",
+    f"--download-archive={ARCHIVE_PATH}",
+    f"--min-duration={MIN_DURATION}", f"--max-duration={MAX_DURATION}",
+    f"--max-downloads={MAX_PLAYLIST_ITEMS}",
+    "--no-playlist", "--ignore-errors", "--no-overwrites",
+    "-o", str(STAGING_DIR / "%(title)s.%(ext)s"),
+]
+
+ARTWORK_FLAGS = ["--convert-thumbnails", "jpg"]
+
+
+def _run(query):
+    cmd = ["yt-dlp", f"ytsearch10:{query}", *COMMON_FLAGS, *ARTWORK_FLAGS]
+    print("SEARCH:", query)
+    if DRY_RUN:
+        print("  (dry-run)")
+        return
+    subprocess.run(cmd, check=False)
+    time.sleep(SEARCH_SLEEP + random.uniform(0, 1))
+
+
+def run_keyword_searches():
+    # weighted shuffle: higher weight = more likely early
+    pool = []
+    for q, w in SEARCH_QUERIES:
+        pool.extend([q] * w)
+    random.shuffle(pool)
+    # dedupe while preserving order
+    seen = set()
+    for q in pool:
+        if q not in seen:
+            seen.add(q)
+            _run(q)
+
+
+def run_artist_searches():
+    # rotate by weight
+    pool = []
+    for name, region, w in ARTIST_QUERIES:
+        pool.extend([name] * w)
+    random.shuffle(pool)
+    seen = set()
+    for name in pool:
+        if name not in seen:
+            seen.add(name)
+            _run(name)
+
+
+def main():
+    run_keyword_searches()
+    run_artist_searches()
+    print("download phase done")
+
+
+if __name__ == "__main__":
+    main()

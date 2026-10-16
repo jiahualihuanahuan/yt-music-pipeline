@@ -1,0 +1,2 @@
+# Run every Sunday at 2 AM
+0 2 * * 0 cd /path/to/music_pipeline && /usr/bin/python3 main.py >> logs/cron.log 2>&1

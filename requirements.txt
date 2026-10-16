@@ -1,0 +1,6 @@
+yt-dlp>=2025.1.0
+requests>=2.31
+rapidfuzz>=3.0
+Pillow>=10.0
+musicbrainzngs>=0.7
+openai>=1.0

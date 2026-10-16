@@ -1,0 +1,12 @@
+staging/
+processed/
+logs/
+*.db
+*.db-wal
+*.db-shm
+downloaded.txt
+artist_allowlist.json
+__pycache__/
+*.pyc
+.DS_Store
+config.local.py
