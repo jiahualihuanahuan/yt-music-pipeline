@@ -13,12 +13,15 @@ from config import (SEARCH_QUERIES, ARTIST_QUERIES, STAGING_DIR, ARCHIVE_PATH,
 STAGING_DIR.mkdir(parents=True, exist_ok=True)
 ARCHIVE_PATH.touch(exist_ok=True)
 
+# Duration filter via match-filters (yt-dlp has no --min-duration / --max-duration)
+DURATION_FILTER = f"duration >= {MIN_DURATION} & duration <= {MAX_DURATION}"
+
 COMMON_FLAGS = [
     "--extract-audio", f"--audio-format={AUDIO_FORMAT}",
     f"--audio-quality={AUDIO_QUALITY}",
     "--embed-thumbnail", "--add-metadata",
     f"--download-archive={ARCHIVE_PATH}",
-    f"--min-duration={MIN_DURATION}", f"--max-duration={MAX_DURATION}",
+    "--match-filters", DURATION_FILTER,
     f"--max-downloads={MAX_PLAYLIST_ITEMS}",
     "--no-playlist", "--ignore-errors", "--no-overwrites",
     "-o", str(STAGING_DIR / "%(title)s.%(ext)s"),
