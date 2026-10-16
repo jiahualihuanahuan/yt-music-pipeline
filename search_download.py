@@ -24,6 +24,12 @@ COMMON_FLAGS = [
     "--match-filters", DURATION_FILTER,
     f"--max-downloads={MAX_PLAYLIST_ITEMS}",
     "--no-playlist", "--ignore-errors", "--no-overwrites",
+    # Reduce 403s / YouTube blocks
+    "--sleep-requests", "1",
+    "--sleep-interval", "2",
+    "--retries", "5",
+    "--fragment-retries", "5",
+    "--remote-components", "ejs:github",
     "-o", str(STAGING_DIR / "%(title)s.%(ext)s"),
 ]
 
