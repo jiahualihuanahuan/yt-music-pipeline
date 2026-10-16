@@ -14,7 +14,8 @@ import time
 from pathlib import Path
 from config import (SEARCH_QUERIES, ARTIST_QUERIES, STAGING_DIR, ARCHIVE_PATH,
                     AUDIO_FORMAT, AUDIO_QUALITY, MIN_DURATION, MAX_DURATION,
-                    MAX_PLAYLIST_ITEMS, SEARCH_RESULTS, SEARCH_SLEEP, DRY_RUN)
+                    MAX_PLAYLIST_ITEMS, SEARCH_RESULTS, SEARCH_SLEEP, DRY_RUN,
+                    COOKIES_PATH)
 
 STAGING_DIR.mkdir(parents=True, exist_ok=True)
 ARCHIVE_PATH.touch(exist_ok=True)
@@ -81,6 +82,12 @@ COMMON_FLAGS = [
 
 if DENO_PATH:
     COMMON_FLAGS.extend(["--js-runtimes", f"deno:{DENO_PATH}"])
+
+if COOKIES_PATH.exists():
+    COMMON_FLAGS.extend(["--cookies", str(COOKIES_PATH)])
+    print(f"Using cookies: {COOKIES_PATH}")
+else:
+    print("No cookies.txt found (optional). Place one in the project root to reduce 403s.")
 
 ARTWORK_FLAGS = ["--convert-thumbnails", "jpg"]
 
