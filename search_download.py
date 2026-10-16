@@ -66,6 +66,9 @@ COMMON_FLAGS = [
     "--match-filters", DURATION_FILTER,
     f"--max-downloads={MAX_PLAYLIST_ITEMS}",
     "--no-playlist", "--ignore-errors", "--no-overwrites",
+    # Prefer clients and formats that currently 403 less often
+    "--extractor-args", "youtube:player_client=android_sdkless,web,mweb",
+    "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
     # Reduce 403s / YouTube blocks
     "--sleep-requests", "1",
     "--sleep-interval", "2",
