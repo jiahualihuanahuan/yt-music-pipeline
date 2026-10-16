@@ -16,25 +16,29 @@ AUDIO_FORMAT = "mp3"
 AUDIO_QUALITY = "320"          # VBR ~320k
 MIN_DURATION = 90              # seconds; filters shorts/trailers
 MAX_DURATION = 600             # seconds; filters long mixes/lives
-MAX_PLAYLIST_ITEMS = 1         # singles only, not compilations
+MAX_PLAYLIST_ITEMS = 100       # max downloads per search query
+SEARCH_RESULTS = 20            # ytsearchN: how many results to inspect
 SEARCH_SLEEP = 2               # seconds between YouTube searches
 
 # ---------- Search queries (keyword-based), weight = relative priority ----------
+# Appended with music-oriented terms so YouTube returns songs, not random videos
 SEARCH_QUERIES = [
     # Chinese (highest weight)
-    ("华语新歌", 10), ("华语翻唱精选", 10), ("国风新歌", 8), ("粤语新歌", 8),
-    ("DJ版华语", 6), ("华语民谣", 6), ("华语R&B", 6), ("华语摇滚", 5),
+    ("华语新歌 official", 10), ("华语翻唱精选 歌曲", 10), ("国风新歌 官方", 8), ("粤语新歌 official", 8),
+    ("DJ版华语 歌曲", 6), ("华语民谣 新歌", 6), ("华语R&B 歌曲", 6), ("华语摇滚 新歌", 5),
+    ("中文歌曲 翻唱 cover", 8), ("华语热门单曲 2025", 9),
     # Korean
-    ("韩语新歌", 7), ("韩语热门单曲", 7), ("K-pop 新歌", 6),
+    ("韩语新歌 official", 7), ("韩语热门单曲 歌曲", 7), ("K-pop 新歌 official audio", 6),
     # Japanese
-    ("J-pop 新歌", 7), ("日本热门歌曲", 6), ("J-rock", 5),
+    ("J-pop 新歌 official", 7), ("日本热门歌曲 官方", 6), ("J-rock 新歌", 5),
     # European
-    ("法语热门歌曲", 5), ("德语热门歌曲", 5), ("意大利语热门", 5),
-    ("西班牙语热门", 5), ("欧洲流行新歌", 5),
+    ("法语热门歌曲 official", 5), ("德语热门歌曲 歌曲", 5), ("意大利语热门 歌曲", 5),
+    ("西班牙语热门 歌曲", 5), ("欧洲流行新歌 official", 5),
     # English-speaking
-    ("美国热门新歌", 6), ("英国热门歌曲", 5), ("加拿大热门", 5), ("澳洲热门歌曲", 5),
+    ("美国热门新歌 official", 6), ("英国热门歌曲 official audio", 5),
+    ("加拿大热门歌曲 official", 5), ("澳洲热门歌曲 official", 5),
     # Latin
-    ("reggaeton 热门", 5), ("拉丁热门歌曲", 5),
+    ("reggaeton 热门 official", 5), ("拉丁热门歌曲 official", 5),
 ]
 
 # ---------- Artist seed lists (top ~20-50 per region, 2025-2026 charts) ----------
@@ -59,7 +63,7 @@ ARTIST_QUERIES = [
     ("S.H.E", "cn", 6), ("苏打绿", "cn", 7), ("草东没有派对", "cn", 6),
     ("万能青年旅店", "cn", 6), ("朴树", "cn", 7), ("老狼", "cn", 6),
     ("信乐团", "cn", 6), ("动力火车", "cn", 6), ("宋冬野", "cn", 7),
-    ("赵雷", "cn", 7), ("马頔", "cn", 6), ("陈粒", "cn", 7),
+    ("赵雷", "cn", 7), ("马頴", "cn", 6), ("陈粒", "cn", 7),
     ("房东的猫", "cn", 6), ("花粥", "cn", 6), ("颜人中", "cn", 6),
     ("任然", "cn", 6), ("隔壁老樊", "cn", 6), ("程响", "cn", 6),
     ("A-Lin", "cn", 7), ("萧敬腾", "cn", 7), ("林宥嘉", "cn", 8),
