@@ -8,7 +8,7 @@ import subprocess
 import time
 from config import (SEARCH_QUERIES, ARTIST_QUERIES, STAGING_DIR, ARCHIVE_PATH,
                     AUDIO_FORMAT, AUDIO_QUALITY, MIN_DURATION, MAX_DURATION,
-                    MAX_PLAYLIST_ITEMS, SEARCH_SLEEP, DRY_RUN)
+                    MAX_PLAYLIST_ITEMS, SEARCH_RESULTS, SEARCH_SLEEP, DRY_RUN)
 
 STAGING_DIR.mkdir(parents=True, exist_ok=True)
 ARCHIVE_PATH.touch(exist_ok=True)
@@ -31,7 +31,7 @@ ARTWORK_FLAGS = ["--convert-thumbnails", "jpg"]
 
 
 def _run(query):
-    cmd = ["yt-dlp", f"ytsearch10:{query}", *COMMON_FLAGS, *ARTWORK_FLAGS]
+    cmd = ["yt-dlp", f"ytsearch{SEARCH_RESULTS}:{query}", *COMMON_FLAGS, *ARTWORK_FLAGS]
     print("SEARCH:", query)
     if DRY_RUN:
         print("  (dry-run)")
@@ -55,7 +55,7 @@ def run_keyword_searches():
 
 
 def run_artist_searches():
-    # rotate by weight
+    # rotate by weight; append music terms so we get songs, not interviews/vlogs
     pool = []
     for name, region, w in ARTIST_QUERIES:
         pool.extend([name] * w)
@@ -64,7 +64,7 @@ def run_artist_searches():
     for name in pool:
         if name not in seen:
             seen.add(name)
-            _run(name)
+            _run(f"{name} official audio OR lyrics OR 歌曲")
 
 
 def main():
