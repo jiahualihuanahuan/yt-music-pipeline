@@ -9,10 +9,11 @@ Also provides incremental helpers used by the parallel pipeline.
 """
 import json
 import re
+import time
 import requests
 from pathlib import Path
 from config import (STAGING_DIR, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT,
-                    LLM_BATCH_SIZE, ALLOWLIST_PATH)
+                    LLM_BATCH_SIZE, LLM_RETRIES, ALLOWLIST_PATH)
 from regex_parser import parse_title
 from local_db import connect, lookup_artist, upsert_artist, normalize
 
@@ -39,18 +40,24 @@ def _call_llm(batch):
         ],
         "temperature": 0.1,
     }
-    try:
-        r = requests.post(f"{LLM_BASE_URL}/chat/completions",
-                          json=payload, timeout=LLM_TIMEOUT)
-        r.raise_for_status()
-        content = r.json()["choices"][0]["message"]["content"]
-        # strip possible markdown fences
-        content = re.sub(r"^```(?:json)?\s*", "", content.strip())
-        content = re.sub(r"\s*```$", "", content)
-        return json.loads(content)
-    except Exception as e:
-        print(f"LLM batch failed: {e}")
-        return None
+    last_err = None
+    for attempt in range(1, LLM_RETRIES + 1):
+        try:
+            r = requests.post(f"{LLM_BASE_URL}/chat/completions",
+                              json=payload, timeout=LLM_TIMEOUT)
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"]["content"]
+            # strip possible markdown fences
+            content = re.sub(r"^```(?:json)?\s*", "", content.strip())
+            content = re.sub(r"\s*```$", "", content)
+            return json.loads(content)
+        except Exception as e:
+            last_err = e
+            print(f"LLM batch attempt {attempt}/{LLM_RETRIES} failed: {e}")
+            if attempt < LLM_RETRIES:
+                time.sleep(3)
+    print(f"LLM batch failed after {LLM_RETRIES} attempts: {last_err}")
+    return None
 
 
 def _update_allowlist(artist_names):
@@ -96,6 +103,11 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
                 meta["album"] = llm_row["album"]
             meta["needs_llm"] = False
             meta["llm_notes"] = llm_row.get("notes")
+    else:
+        # LLM failed — keep regex result, mark as not needing further LLM
+        for meta in batch:
+            meta["needs_llm"] = False
+            meta["llm_notes"] = "llm_failed"
     return batch
 
 
