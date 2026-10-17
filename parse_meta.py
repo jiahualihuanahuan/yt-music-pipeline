@@ -4,6 +4,8 @@
 2. collect needs_llm items into batches
 3. send batches to local Qwen (OpenAI-compatible)
 4. merge + validate results, update allowlist
+
+Also provides incremental helpers used by the parallel pipeline.
 """
 import json
 import re
@@ -69,35 +71,35 @@ def _update_allowlist(artist_names):
         print(f"allowlist +{len(added)}: {sorted(added)[:10]}")
 
 
-def parse_all():
-    results = []
-    llm_queue = []
-    for f in sorted(STAGING_DIR.glob("*.mp3")):
-        meta = parse_title(f.stem)
-        meta["file"] = f.name
-        if meta["needs_llm"]:
-            llm_queue.append(meta)
-        results.append(meta)
+def parse_one(path: Path) -> dict:
+    """Parse a single mp3 by filename. Returns meta dict with 'file' key."""
+    meta = parse_title(path.stem)
+    meta["file"] = path.name
+    return meta
 
-    # batch LLM
-    for i in range(0, len(llm_queue), LLM_BATCH_SIZE):
-        batch = llm_queue[i:i + LLM_BATCH_SIZE]
-        print(f"LLM batch {i//LLM_BATCH_SIZE + 1}: {len(batch)} items")
-        out = _call_llm(batch)
-        if out and len(out) == len(batch):
-            for meta, llm_row in zip(batch, out):
-                if llm_row.get("title"):
-                    meta["title"] = llm_row["title"]
-                if llm_row.get("artist"):
-                    meta["artist"] = llm_row["artist"]
-                if llm_row.get("featured"):
-                    meta["featured"] = llm_row["featured"]
-                if llm_row.get("album"):
-                    meta["album"] = llm_row["album"]
-                meta["needs_llm"] = False
-                meta["llm_notes"] = llm_row.get("notes")
 
-    # collect all artist names for allowlist
+def apply_llm_batch(batch: list[dict]) -> list[dict]:
+    """Send one batch to LLM and merge results back into the meta dicts."""
+    if not batch:
+        return batch
+    print(f"LLM batch: {len(batch)} items")
+    out = _call_llm(batch)
+    if out and len(out) == len(batch):
+        for meta, llm_row in zip(batch, out):
+            if llm_row.get("title"):
+                meta["title"] = llm_row["title"]
+            if llm_row.get("artist"):
+                meta["artist"] = llm_row["artist"]
+            if llm_row.get("featured"):
+                meta["featured"] = llm_row["featured"]
+            if llm_row.get("album"):
+                meta["album"] = llm_row["album"]
+            meta["needs_llm"] = False
+            meta["llm_notes"] = llm_row.get("notes")
+    return batch
+
+
+def finalize_allowlist(results: list[dict]):
     names = set()
     for m in results:
         if m.get("artist"):
@@ -105,4 +107,20 @@ def parse_all():
         for f in m.get("featured") or []:
             names.add(f)
     _update_allowlist(names)
+
+
+def parse_all():
+    """Legacy sequential entry point."""
+    results = []
+    llm_queue = []
+    for f in sorted(STAGING_DIR.glob("*.mp3")):
+        meta = parse_one(f)
+        if meta["needs_llm"]:
+            llm_queue.append(meta)
+        results.append(meta)
+
+    for i in range(0, len(llm_queue), LLM_BATCH_SIZE):
+        apply_llm_batch(llm_queue[i:i + LLM_BATCH_SIZE])
+
+    finalize_allowlist(results)
     return results
