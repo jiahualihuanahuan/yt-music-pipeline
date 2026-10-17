@@ -191,8 +191,8 @@ DEDUP_THRESHOLD = 85  # rapidfuzz score on "title + artist"; >= this = duplicate
 # ---------- LLM (local Qwen via OpenAI-compatible endpoint) ----------
 LLM_BASE_URL = "http://192.168.86.35:11434/v1"
 LLM_MODEL = "qwen3.5:9b"
-LLM_TIMEOUT = 300          # longer timeout for slower local inference
-LLM_BATCH_SIZE = 5         # smaller batches to avoid timeouts
+LLM_TIMEOUT = None         # no timeout; let local model finish
+LLM_BATCH_SIZE = 15        # short titles; 3080 10GB + 9B Q4 has ~3GB headroom
 LLM_RETRIES = 2            # retry failed batches
 
 # ---------- API keys (optional) ----------
