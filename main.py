@@ -2,9 +2,10 @@
 """Music pipeline orchestrator.
 
 Usage:
-  python main.py              # full run (download + post-process in parallel)
-  python main.py --dry-run    # search + parse only, no downloads
-  python main.py --skip-dl    # skip download phase, process existing staging
+  python main.py                              # full run (download + post-process in parallel)
+  python main.py --dry-run                    # search + parse only, no downloads
+  python main.py --skip-dl                    # skip download phase, process existing staging
+  python main.py --reprocess /path/to/music   # retag MP3s already in a folder (in place)
 """
 import argparse
 import json
@@ -41,7 +42,6 @@ def _clean_artist(name: str) -> str:
         if low.endswith(" " + noise) or low.endswith("-" + noise) or low.endswith("_" + noise):
             n = n[: -(len(noise) + 1)].strip(" -_")
             break
-    # remove trailing " - Topic" style
     if low.endswith(" - topic"):
         n = n[:-8].strip()
     return n or name
@@ -59,7 +59,7 @@ def _write_tags(path: Path, title: str, artist: str, album: str, featured=None):
         tags["TIT2"] = TIT2(encoding=3, text=title)
         tags["TPE1"] = TPE1(encoding=3, text=artist)
         tags["TALB"] = TALB(encoding=3, text=album)
-        tags["TPE2"] = TPE2(encoding=3, text=artist)  # album artist
+        tags["TPE2"] = TPE2(encoding=3, text=artist)
         if featured:
             tags["TXXX:FEATURED"] = TXXX(encoding=3, desc="FEATURED", text=", ".join(featured))
         audio.save()
@@ -74,12 +74,10 @@ def organize_one(meta):
     if not src.exists():
         return None
 
-    # force album = title when missing
     title = meta.get("title") or src.stem
     artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "Unknown")
     album = meta.get("album") or title
 
-    # keep cleaned values in meta for sidecar
     meta["title"] = title
     meta["artist_canonical"] = artist
     meta["album"] = album
@@ -91,7 +89,6 @@ def organize_one(meta):
     if src.resolve() != dest.resolve():
         shutil.move(str(src), str(dest))
 
-    # cover art
     thumb = src.with_suffix(".jpg")
     if not thumb.exists():
         thumb = Path(str(src) + ".jpg")
@@ -99,11 +96,9 @@ def organize_one(meta):
     if thumb.exists():
         process_cover(thumb, cover_dst)
 
-    # write ID3 tags (this is what Navidrome reads)
     _write_tags(dest, title, artist, album, meta.get("featured"))
 
     meta["processed_path"] = str(dest)
-    # sidecar
     sidecar = dest.with_suffix(".json")
     sidecar.write_text(json.dumps({
         "raw_youtube_title": meta.get("raw"),
@@ -126,7 +121,6 @@ def _process_ready(meta, kept, organized, lock):
     except Exception as e:
         print(f"enrich failed for {meta.get('file')}: {e}")
 
-    # force album fallback before dedup/organize
     if not meta.get("album"):
         meta["album"] = meta.get("title") or "Unknown"
 
@@ -147,13 +141,10 @@ def _process_ready(meta, kept, organized, lock):
 
 
 def _watch_and_process(stop_event: threading.Event, organized: list, lock: threading.Lock):
-    """Watch staging. Parse immediately. LLM in batches.
-    As soon as a file is ready (no LLM needed, or LLM done), enrich + dedup + organize.
-    """
     seen = set()
     llm_buf = []
     all_parsed = []
-    kept = []  # for incremental dedup
+    kept = []
 
     def flush_llm():
         nonlocal llm_buf
@@ -197,7 +188,6 @@ def _watch_and_process(stop_event: threading.Event, organized: list, lock: threa
 
 
 def run_parallel():
-    """Download in background while parsing / enriching / organizing new files."""
     stop_event = threading.Event()
     organized = []
     lock = threading.Lock()
@@ -218,15 +208,98 @@ def run_parallel():
     return organized
 
 
+def reprocess_folder(folder: Path):
+    """Re-parse and retag every MP3 under folder, in place.
+    Does not move files. Forces album fallback. Writes ID3 tags.
+    """
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+
+    mp3s = sorted(folder.rglob("*.mp3"))
+    print(f"reprocess: {len(mp3s)} files under {folder}")
+
+    llm_buf = []
+    results = []
+
+    def flush():
+        nonlocal llm_buf
+        if not llm_buf:
+            return
+        apply_llm_batch(llm_buf)
+        for m in llm_buf:
+            _retag_one(m)
+            results.append(m)
+        llm_buf = []
+
+    for f in mp3s:
+        meta = parse_one(f)
+        meta["path"] = str(f)  # keep full path for in-place write
+        print(f"parsed: {f.name}  needs_llm={meta.get('needs_llm')}")
+        if meta.get("needs_llm"):
+            llm_buf.append(meta)
+            if len(llm_buf) >= LLM_BATCH_SIZE:
+                flush()
+        else:
+            try:
+                meta = enrich(meta)
+            except Exception as e:
+                print(f"enrich failed: {e}")
+            _retag_one(meta)
+            results.append(meta)
+
+    flush()
+    finalize_allowlist(results)
+    print(f"reprocess done: {len(results)} files")
+
+
+def _retag_one(meta):
+    """Enrich (if not already) and write tags in place. Force album."""
+    path = Path(meta.get("path") or "")
+    if not path.exists():
+        return
+    try:
+        meta = enrich(meta)
+    except Exception:
+        pass
+
+    title = meta.get("title") or path.stem
+    artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "Unknown")
+    album = meta.get("album") or title
+
+    _write_tags(path, title, artist, album, meta.get("featured"))
+    print(f"tagged: {artist} - {title}  [{album}]")
+
+    # update sidecar next to the file
+    sidecar = path.with_suffix(".json")
+    sidecar.write_text(json.dumps({
+        "raw_youtube_title": meta.get("raw"),
+        "title": title,
+        "artist": meta.get("artist"),
+        "featured": meta.get("featured"),
+        "artist_canonical": artist,
+        "album": album,
+        "confidence": meta.get("confidence"),
+        "llm_notes": meta.get("llm_notes"),
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--skip-dl", action="store_true")
+    ap.add_argument("--reprocess", type=str, metavar="DIR",
+                    help="reparse + retag all MP3s under DIR in place")
     args = ap.parse_args()
 
     LOG_DIR.mkdir(exist_ok=True)
     init_db()
     print("local DB stats:", stats())
+
+    if args.reprocess:
+        reprocess_folder(Path(args.reprocess))
+        return
 
     if args.dry_run:
         import config as cfg
