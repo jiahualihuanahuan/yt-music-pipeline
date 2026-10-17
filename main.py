@@ -187,7 +187,11 @@ def main():
                 print(f"enrich failed for {meta.get('file')}: {e}")
                 enriched.append(meta)
         kept = dedup(enriched)
-        organized = [organize_one(m) for m in kept if organize_one(m)]
+        organized = []
+        for m in kept:
+            r = organize_one(m)
+            if r:
+                organized.append(r)
     else:
         organized = run_parallel()
 
