@@ -9,4 +9,5 @@ artist_allowlist.json
 __pycache__/
 *.pyc
 .DS_Store
-config.local.py
+cookies.txt
+config_local.py
