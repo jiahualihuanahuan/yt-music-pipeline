@@ -40,11 +40,13 @@ def _call_llm(batch):
         ],
         "temperature": 0.1,
     }
+    # None or 0 means no timeout
+    timeout = None if not LLM_TIMEOUT else LLM_TIMEOUT
     last_err = None
     for attempt in range(1, LLM_RETRIES + 1):
         try:
             r = requests.post(f"{LLM_BASE_URL}/chat/completions",
-                              json=payload, timeout=LLM_TIMEOUT)
+                              json=payload, timeout=timeout)
             r.raise_for_status()
             content = r.json()["choices"][0]["message"]["content"]
             # strip possible markdown fences
