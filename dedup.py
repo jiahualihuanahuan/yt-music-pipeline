@@ -14,23 +14,28 @@ def _key(meta):
     return f"{t} {a}"
 
 
+def is_duplicate(meta, kept):
+    """Return True if meta is a duplicate of something already in kept.
+    If a better version is found, replace it in-place and return False.
+    """
+    k = _key(meta)
+    for prev in kept:
+        if fuzz.token_sort_ratio(k, _key(prev)) >= DEDUP_THRESHOLD:
+            # keep the one with better confidence
+            if (meta.get("confidence") or "") < (prev.get("confidence") or ""):
+                return True
+            else:
+                kept.remove(prev)
+                return False
+    return False
+
+
 def dedup(results):
     """results: list of meta dicts with 'file' and processed path info.
     Returns list with duplicates removed (kept = higher quality)."""
     kept = []
     for meta in results:
-        k = _key(meta)
-        dup = False
-        for prev in kept:
-            if fuzz.token_sort_ratio(k, _key(prev)) >= DEDUP_THRESHOLD:
-                # keep the one with better confidence / longer duration proxy
-                if (meta.get("confidence") or "") < (prev.get("confidence") or ""):
-                    dup = True
-                    break
-                else:
-                    kept.remove(prev)
-                    break
-        if not dup:
+        if not is_duplicate(meta, kept):
             kept.append(meta)
     removed = len(results) - len(kept)
     if removed:
