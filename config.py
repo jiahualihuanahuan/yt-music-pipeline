@@ -1,6 +1,6 @@
 """All tunable parameters live here. Fill in API keys before first run.
 
-Local overrides: create config.local.py (gitignored) and redefine any
+Local overrides: create config_local.py (gitignored) and redefine any
 variable you want to change. It is loaded at the bottom of this file.
 """
 from pathlib import Path
