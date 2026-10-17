@@ -1,4 +1,8 @@
-"""All tunable parameters live here. Fill in API keys before first run."""
+"""All tunable parameters live here. Fill in API keys before first run.
+
+Local overrides: create config.local.py (gitignored) and redefine any
+variable you want to change. It is loaded at the bottom of this file.
+"""
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -201,3 +205,9 @@ DISCOGS_TOKEN = ""
 USER_AGENT = "music-pipeline/1.0 (personal; contact via GitHub)"
 MB_CONTACT = "music-pipeline@localhost"
 DRY_RUN = False
+
+# ---------- Local overrides (gitignored) ----------
+try:
+    from config_local import *  # type: ignore
+except ImportError:
+    pass
