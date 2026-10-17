@@ -24,22 +24,73 @@ from dedup import dedup, is_duplicate
 from artwork import process_cover
 from local_db import init_db, connect, stats
 
+# channel / uploader noise that often gets mistaken for artist
+CHANNEL_NOISE = {
+    "official", "channel", "topic", "vevo", "music", "records", "entertainment",
+    "official audio", "official video", "official mv", "lyrics", "hd", "4k",
+}
+
+
+def _clean_artist(name: str) -> str:
+    """Strip common channel/uploader suffixes that aren't real artists."""
+    if not name:
+        return name
+    n = name.strip()
+    low = n.lower()
+    for noise in CHANNEL_NOISE:
+        if low.endswith(" " + noise) or low.endswith("-" + noise) or low.endswith("_" + noise):
+            n = n[: -(len(noise) + 1)].strip(" -_")
+            break
+    # remove trailing " - Topic" style
+    if low.endswith(" - topic"):
+        n = n[:-8].strip()
+    return n or name
+
+
+def _write_tags(path: Path, title: str, artist: str, album: str, featured=None):
+    """Write ID3 tags so Navidrome/other players see correct metadata."""
+    try:
+        from mutagen.mp3 import MP3
+        from mutagen.id3 import ID3, TIT2, TPE1, TALB, TPE2, TXXX
+        audio = MP3(path)
+        if audio.tags is None:
+            audio.add_tags()
+        tags = audio.tags
+        tags["TIT2"] = TIT2(encoding=3, text=title)
+        tags["TPE1"] = TPE1(encoding=3, text=artist)
+        tags["TALB"] = TALB(encoding=3, text=album)
+        tags["TPE2"] = TPE2(encoding=3, text=artist)  # album artist
+        if featured:
+            tags["TXXX:FEATURED"] = TXXX(encoding=3, desc="FEATURED", text=", ".join(featured))
+        audio.save()
+    except Exception as e:
+        print(f"tag write failed for {path.name}: {e}")
+
 
 def organize_one(meta):
-    """Move one staged file into Processed/Artist/Album/Title.mp3 + cover."""
+    """Move one staged file into Processed/Artist/Album/Title.mp3 + cover + ID3 tags."""
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     src = STAGING_DIR / meta["file"]
     if not src.exists():
         return None
-    artist = meta.get("artist_canonical") or meta.get("artist") or "Unknown"
-    album = meta.get("album") or meta.get("title") or "Unknown"
+
+    # force album = title when missing
     title = meta.get("title") or src.stem
+    artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "Unknown")
+    album = meta.get("album") or title
+
+    # keep cleaned values in meta for sidecar
+    meta["title"] = title
+    meta["artist_canonical"] = artist
+    meta["album"] = album
+
     safe = lambda s: "".join(c for c in s if c not in '/\\:*?"<>|').strip() or "Unknown"
     dest_dir = PROCESSED_DIR / safe(artist) / safe(album)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{safe(title)}.mp3"
     if src.resolve() != dest.resolve():
         shutil.move(str(src), str(dest))
+
     # cover art
     thumb = src.with_suffix(".jpg")
     if not thumb.exists():
@@ -47,16 +98,20 @@ def organize_one(meta):
     cover_dst = dest_dir / "cover.jpg"
     if thumb.exists():
         process_cover(thumb, cover_dst)
+
+    # write ID3 tags (this is what Navidrome reads)
+    _write_tags(dest, title, artist, album, meta.get("featured"))
+
     meta["processed_path"] = str(dest)
     # sidecar
     sidecar = dest.with_suffix(".json")
     sidecar.write_text(json.dumps({
         "raw_youtube_title": meta.get("raw"),
-        "title": meta.get("title"),
+        "title": title,
         "artist": meta.get("artist"),
         "featured": meta.get("featured"),
-        "artist_canonical": meta.get("artist_canonical"),
-        "album": meta.get("album"),
+        "artist_canonical": artist,
+        "album": album,
         "album_year": meta.get("album_year"),
         "confidence": meta.get("confidence"),
         "llm_notes": meta.get("llm_notes"),
@@ -71,10 +126,13 @@ def _process_ready(meta, kept, organized, lock):
     except Exception as e:
         print(f"enrich failed for {meta.get('file')}: {e}")
 
+    # force album fallback before dedup/organize
+    if not meta.get("album"):
+        meta["album"] = meta.get("title") or "Unknown"
+
     with lock:
         if is_duplicate(meta, kept):
             print(f"dedup skip: {meta.get('file')}")
-            # remove the staged file so it doesn't get reprocessed
             src = STAGING_DIR / meta["file"]
             if src.exists():
                 src.unlink(missing_ok=True)
@@ -129,13 +187,11 @@ def _watch_and_process(stop_event: threading.Event, organized: list, lock: threa
                 if len(llm_buf) >= LLM_BATCH_SIZE:
                     flush_llm()
             else:
-                # no LLM needed — process immediately
                 _process_ready(meta, kept, organized, lock)
 
         if not stop_event.is_set():
             time.sleep(1.5)
 
-    # final LLM flush
     flush_llm()
     finalize_allowlist(all_parsed)
 
@@ -177,7 +233,6 @@ def main():
         cfg.DRY_RUN = True
 
     if args.skip_dl or args.dry_run:
-        # sequential path
         results = parse_all()
         enriched = []
         for meta in results:
@@ -195,7 +250,6 @@ def main():
     else:
         organized = run_parallel()
 
-    # summary
     summary = {
         "run_at": datetime.now().isoformat(),
         "organized": len(organized),
