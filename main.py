@@ -5,7 +5,8 @@ Usage:
   python main.py                              # full run (download + post-process in parallel)
   python main.py --dry-run                    # search + parse only, no downloads
   python main.py --skip-dl                    # skip download phase, process existing staging
-  python main.py --reprocess /path/to/music   # retag MP3s already in a folder (in place)
+  python main.py --reprocess /path/to/music   # retag all MP3s in folder (in place)
+  python main.py --fill-missing /path/to/music # only retag files missing title/artist/album
 """
 import argparse
 import json
@@ -45,6 +46,26 @@ def _clean_artist(name: str) -> str:
     if low.endswith(" - topic"):
         n = n[:-8].strip()
     return n or name
+
+
+def _read_tags(path: Path) -> dict:
+    """Read existing title/artist/album from ID3. Empty string if missing."""
+    try:
+        from mutagen.mp3 import MP3
+        audio = MP3(path)
+        tags = audio.tags or {}
+        def _get(key):
+            v = tags.get(key)
+            if not v:
+                return ""
+            return str(v.text[0]) if hasattr(v, "text") and v.text else ""
+        return {
+            "title": _get("TIT2"),
+            "artist": _get("TPE1"),
+            "album": _get("TALB"),
+        }
+    except Exception:
+        return {"title": "", "artist": "", "album": ""}
 
 
 def _write_tags(path: Path, title: str, artist: str, album: str, featured=None):
@@ -208,17 +229,26 @@ def run_parallel():
     return organized
 
 
-def reprocess_folder(folder: Path):
-    """Re-parse and retag every MP3 under folder, in place.
-    Does not move files. Forces album fallback. Writes ID3 tags.
+def reprocess_folder(folder: Path, only_missing: bool = False):
+    """Re-parse and retag MP3s under folder, in place.
+    If only_missing=True, skip files that already have title + artist + album.
     """
     folder = folder.resolve()
     if not folder.is_dir():
         print(f"not a directory: {folder}")
         return
 
-    mp3s = sorted(folder.rglob("*.mp3"))
-    print(f"reprocess: {len(mp3s)} files under {folder}")
+    all_mp3s = sorted(folder.rglob("*.mp3"))
+    if only_missing:
+        mp3s = []
+        for f in all_mp3s:
+            tags = _read_tags(f)
+            if not (tags["title"] and tags["artist"] and tags["album"]):
+                mp3s.append(f)
+        print(f"fill-missing: {len(mp3s)} / {len(all_mp3s)} files need tags")
+    else:
+        mp3s = all_mp3s
+        print(f"reprocess: {len(mp3s)} files under {folder}")
 
     llm_buf = []
     results = []
@@ -235,7 +265,7 @@ def reprocess_folder(folder: Path):
 
     for f in mp3s:
         meta = parse_one(f)
-        meta["path"] = str(f)  # keep full path for in-place write
+        meta["path"] = str(f)
         print(f"parsed: {f.name}  needs_llm={meta.get('needs_llm')}")
         if meta.get("needs_llm"):
             llm_buf.append(meta)
@@ -251,7 +281,7 @@ def reprocess_folder(folder: Path):
 
     flush()
     finalize_allowlist(results)
-    print(f"reprocess done: {len(results)} files")
+    print(f"done: {len(results)} files")
 
 
 def _retag_one(meta):
@@ -271,7 +301,6 @@ def _retag_one(meta):
     _write_tags(path, title, artist, album, meta.get("featured"))
     print(f"tagged: {artist} - {title}  [{album}]")
 
-    # update sidecar next to the file
     sidecar = path.with_suffix(".json")
     sidecar.write_text(json.dumps({
         "raw_youtube_title": meta.get("raw"),
@@ -291,14 +320,19 @@ def main():
     ap.add_argument("--skip-dl", action="store_true")
     ap.add_argument("--reprocess", type=str, metavar="DIR",
                     help="reparse + retag all MP3s under DIR in place")
+    ap.add_argument("--fill-missing", type=str, metavar="DIR",
+                    help="only retag MP3s missing title, artist, or album")
     args = ap.parse_args()
 
     LOG_DIR.mkdir(exist_ok=True)
     init_db()
     print("local DB stats:", stats())
 
+    if args.fill_missing:
+        reprocess_folder(Path(args.fill_missing), only_missing=True)
+        return
     if args.reprocess:
-        reprocess_folder(Path(args.reprocess))
+        reprocess_folder(Path(args.reprocess), only_missing=False)
         return
 
     if args.dry_run:
