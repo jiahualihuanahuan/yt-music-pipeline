@@ -20,70 +20,99 @@ from config import (STAGING_DIR, PROCESSED_DIR, LOG_DIR, DRY_RUN,
 from search_download import main as run_downloads
 from parse_meta import parse_one, apply_llm_batch, finalize_allowlist, parse_all
 from musicbrainz import enrich
-from dedup import dedup
+from dedup import dedup, is_duplicate
 from artwork import process_cover
 from local_db import init_db, connect, stats
 
 
-def organize(results):
-    """Move/copy staged files into Processed/Artist/Album/Title.mp3 + cover."""
+def organize_one(meta):
+    """Move one staged file into Processed/Artist/Album/Title.mp3 + cover."""
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    organized = []
-    for meta in results:
-        src = STAGING_DIR / meta["file"]
-        if not src.exists():
-            continue
-        artist = meta.get("artist_canonical") or meta.get("artist") or "Unknown"
-        album = meta.get("album") or meta.get("title") or "Unknown"
-        title = meta.get("title") or src.stem
-        # sanitize folder names
-        safe = lambda s: "".join(c for c in s if c not in '/\\:*?"<>|').strip() or "Unknown"
-        dest_dir = PROCESSED_DIR / safe(artist) / safe(album)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / f"{safe(title)}.mp3"
-        if src.resolve() != dest.resolve():
-            shutil.move(str(src), str(dest))
-        # cover art
-        thumb = src.with_suffix(".jpg")
-        if not thumb.exists():
-            thumb = Path(str(src) + ".jpg")
-        cover_dst = dest_dir / "cover.jpg"
-        if thumb.exists():
-            process_cover(thumb, cover_dst)
-        meta["processed_path"] = str(dest)
-        # write a small sidecar json for traceability
-        sidecar = dest.with_suffix(".json")
-        sidecar.write_text(json.dumps({
-            "raw_youtube_title": meta.get("raw"),
-            "title": meta.get("title"),
-            "artist": meta.get("artist"),
-            "featured": meta.get("featured"),
-            "artist_canonical": meta.get("artist_canonical"),
-            "album": meta.get("album"),
-            "album_year": meta.get("album_year"),
-            "confidence": meta.get("confidence"),
-            "llm_notes": meta.get("llm_notes"),
-        }, ensure_ascii=False, indent=1), encoding="utf-8")
-        organized.append(meta)
-    return organized
+    src = STAGING_DIR / meta["file"]
+    if not src.exists():
+        return None
+    artist = meta.get("artist_canonical") or meta.get("artist") or "Unknown"
+    album = meta.get("album") or meta.get("title") or "Unknown"
+    title = meta.get("title") or src.stem
+    safe = lambda s: "".join(c for c in s if c not in '/\\:*?"<>|').strip() or "Unknown"
+    dest_dir = PROCESSED_DIR / safe(artist) / safe(album)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{safe(title)}.mp3"
+    if src.resolve() != dest.resolve():
+        shutil.move(str(src), str(dest))
+    # cover art
+    thumb = src.with_suffix(".jpg")
+    if not thumb.exists():
+        thumb = Path(str(src) + ".jpg")
+    cover_dst = dest_dir / "cover.jpg"
+    if thumb.exists():
+        process_cover(thumb, cover_dst)
+    meta["processed_path"] = str(dest)
+    # sidecar
+    sidecar = dest.with_suffix(".json")
+    sidecar.write_text(json.dumps({
+        "raw_youtube_title": meta.get("raw"),
+        "title": meta.get("title"),
+        "artist": meta.get("artist"),
+        "featured": meta.get("featured"),
+        "artist_canonical": meta.get("artist_canonical"),
+        "album": meta.get("album"),
+        "album_year": meta.get("album_year"),
+        "confidence": meta.get("confidence"),
+        "llm_notes": meta.get("llm_notes"),
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+    return meta
 
 
-def _watch_and_parse(stop_event: threading.Event, result_q: Queue):
-    """Watch staging for new mp3s. Parse with regex immediately.
-    Send LLM batches as soon as LLM_BATCH_SIZE is reached.
+def _process_ready(meta, kept, organized, lock):
+    """Enrich + incremental dedup + organize one ready file."""
+    try:
+        meta = enrich(meta)
+    except Exception as e:
+        print(f"enrich failed for {meta.get('file')}: {e}")
+
+    with lock:
+        if is_duplicate(meta, kept):
+            print(f"dedup skip: {meta.get('file')}")
+            # remove the staged file so it doesn't get reprocessed
+            src = STAGING_DIR / meta["file"]
+            if src.exists():
+                src.unlink(missing_ok=True)
+            return
+        kept.append(meta)
+
+    result = organize_one(meta)
+    if result:
+        with lock:
+            organized.append(result)
+        print(f"organized: {meta.get('artist_canonical') or meta.get('artist')} - {meta.get('title')}")
+
+
+def _watch_and_process(stop_event: threading.Event, organized: list, lock: threading.Lock):
+    """Watch staging. Parse immediately. LLM in batches.
+    As soon as a file is ready (no LLM needed, or LLM done), enrich + dedup + organize.
     """
     seen = set()
     llm_buf = []
-    all_results = []
+    all_parsed = []
+    kept = []  # for incremental dedup
+
+    def flush_llm():
+        nonlocal llm_buf
+        if not llm_buf:
+            return
+        apply_llm_batch(llm_buf)
+        for m in llm_buf:
+            _process_ready(m, kept, organized, lock)
+        llm_buf = []
 
     while not stop_event.is_set() or any(STAGING_DIR.glob("*.mp3")):
         new_files = []
         for f in STAGING_DIR.glob("*.mp3"):
             if f.name not in seen:
-                # skip files still being written (size not stable)
                 try:
                     size1 = f.stat().st_size
-                    time.sleep(0.3)
+                    time.sleep(0.2)
                     size2 = f.stat().st_size
                     if size1 == size2 and size1 > 0:
                         new_files.append(f)
@@ -93,48 +122,44 @@ def _watch_and_parse(stop_event: threading.Event, result_q: Queue):
         for f in new_files:
             seen.add(f.name)
             meta = parse_one(f)
-            all_results.append(meta)
+            all_parsed.append(meta)
             print(f"parsed: {f.name}  needs_llm={meta.get('needs_llm')}")
             if meta.get("needs_llm"):
                 llm_buf.append(meta)
                 if len(llm_buf) >= LLM_BATCH_SIZE:
-                    apply_llm_batch(llm_buf)
-                    llm_buf = []
+                    flush_llm()
+            else:
+                # no LLM needed — process immediately
+                _process_ready(meta, kept, organized, lock)
 
-        # brief pause before next poll
         if not stop_event.is_set():
-            time.sleep(2)
+            time.sleep(1.5)
 
-    # final flush of remaining LLM items
-    if llm_buf:
-        apply_llm_batch(llm_buf)
-
-    finalize_allowlist(all_results)
-    result_q.put(all_results)
+    # final LLM flush
+    flush_llm()
+    finalize_allowlist(all_parsed)
 
 
 def run_parallel():
-    """Download in background while parsing new files as they arrive."""
+    """Download in background while parsing / enriching / organizing new files."""
     stop_event = threading.Event()
-    result_q: Queue = Queue()
+    organized = []
+    lock = threading.Lock()
 
-    # start watcher
-    watcher = threading.Thread(target=_watch_and_parse, args=(stop_event, result_q), daemon=True)
-    watcher.start()
+    worker = threading.Thread(
+        target=_watch_and_process,
+        args=(stop_event, organized, lock),
+        daemon=True,
+    )
+    worker.start()
 
-    # run downloads (blocks until all searches done)
     try:
         run_downloads()
     finally:
         stop_event.set()
 
-    watcher.join(timeout=600)
-    try:
-        results = result_q.get(timeout=5)
-    except Empty:
-        print("warning: watcher returned no results")
-        results = []
-    return results
+    worker.join(timeout=900)
+    return organized
 
 
 def main():
@@ -152,29 +177,23 @@ def main():
         cfg.DRY_RUN = True
 
     if args.skip_dl or args.dry_run:
-        # sequential path for dry-run / process-only
+        # sequential path
         results = parse_all()
+        enriched = []
+        for meta in results:
+            try:
+                enriched.append(enrich(meta))
+            except Exception as e:
+                print(f"enrich failed for {meta.get('file')}: {e}")
+                enriched.append(meta)
+        kept = dedup(enriched)
+        organized = [organize_one(m) for m in kept if organize_one(m)]
     else:
-        results = run_parallel()
-
-    print(f"parsed {len(results)} files")
-
-    enriched = []
-    for meta in results:
-        try:
-            enriched.append(enrich(meta))
-        except Exception as e:
-            print(f"enrich failed for {meta.get('file')}: {e}")
-            enriched.append(meta)
-
-    kept = dedup(enriched)
-    organized = organize(kept)
+        organized = run_parallel()
 
     # summary
     summary = {
         "run_at": datetime.now().isoformat(),
-        "total_parsed": len(results),
-        "after_dedup": len(kept),
         "organized": len(organized),
         "high_confidence": sum(1 for m in organized if m.get("confidence") == "high"),
         "llm_used": sum(1 for m in organized if m.get("llm_notes") is not None),
