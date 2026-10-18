@@ -100,7 +100,9 @@ def _write_tags(path: Path, title: str, artist: str, album: str, featured=None):
 
 
 def organize_one(meta):
-    """Move one staged file into Processed/Artist/Album/Title.mp3 + cover + ID3 tags."""
+    """Move one staged file into Processed/Artist/Album/<original_youtube_name>.mp3
+    Filename is never renamed. Only folder and ID3 tags change.
+    """
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     src = STAGING_DIR / meta["file"]
     if not src.exists():
@@ -117,7 +119,8 @@ def organize_one(meta):
     safe = lambda s: "".join(c for c in s if c not in '/\\:*?"<>|').strip() or "Unknown"
     dest_dir = PROCESSED_DIR / safe(artist) / safe(album)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{safe(title)}.mp3"
+    # keep original YouTube filename
+    dest = dest_dir / src.name
     if src.resolve() != dest.resolve():
         shutil.move(str(src), str(dest))
 
@@ -131,9 +134,11 @@ def organize_one(meta):
     _write_tags(dest, title, artist, album, meta.get("featured"))
 
     meta["processed_path"] = str(dest)
+    # sidecar uses original stem so it stays next to the original filename
     sidecar = dest.with_suffix(".json")
     sidecar.write_text(json.dumps({
         "raw_youtube_title": meta.get("raw"),
+        "original_filename": src.name,
         "title": title,
         "artist": meta.get("artist"),
         "featured": meta.get("featured"),
@@ -243,6 +248,7 @@ def run_parallel():
 def reprocess_folder(folder: Path, only_missing: bool = False):
     """Re-parse and retag MP3s under folder, in place.
     If only_missing=True, skip files that already have title + artist + album.
+    Never renames files.
     """
     folder = folder.resolve()
     if not folder.is_dir():
@@ -277,7 +283,7 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
     for f in mp3s:
         meta = parse_one(f)
         meta["path"] = str(f)
-        # folder structure fallback (Artist/Album/Title.mp3)
+        # folder structure fallback (Artist/Album/original_name.mp3)
         fb = _folder_fallback(f)
         meta["folder_artist"] = fb["folder_artist"]
         meta["folder_album"] = fb["folder_album"]
@@ -287,7 +293,6 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
             meta["album"] = fb["folder_album"]
         print(f"parsed: {f.name}  artist={meta.get('artist')}  needs_llm={meta.get('needs_llm')}")
         if meta.get("needs_llm") and not meta.get("artist"):
-            # only send to LLM if we still have no artist
             llm_buf.append(meta)
             if len(llm_buf) >= LLM_BATCH_SIZE:
                 flush()
@@ -305,7 +310,9 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
 
 
 def _retag_one(meta):
-    """Enrich (if not already) and write tags in place. Force album."""
+    """Enrich (if not already) and write tags in place. Force album.
+    Does not rename the file.
+    """
     path = Path(meta.get("path") or "")
     if not path.exists():
         return
@@ -315,7 +322,6 @@ def _retag_one(meta):
         pass
 
     title = meta.get("title") or path.stem
-    # priority: canonical > parsed > folder name > Unknown
     artist = _clean_artist(
         meta.get("artist_canonical")
         or meta.get("artist")
@@ -324,7 +330,6 @@ def _retag_one(meta):
     )
     album = meta.get("album") or meta.get("folder_album") or title
 
-    # never write empty
     if not artist or artist.lower() in ("", "none", "null"):
         artist = meta.get("folder_artist") or "Unknown"
     if not album:
@@ -336,6 +341,7 @@ def _retag_one(meta):
     sidecar = path.with_suffix(".json")
     sidecar.write_text(json.dumps({
         "raw_youtube_title": meta.get("raw"),
+        "original_filename": path.name,
         "title": title,
         "artist": meta.get("artist"),
         "featured": meta.get("featured"),
