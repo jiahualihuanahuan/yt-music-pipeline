@@ -48,6 +48,17 @@ def _clean_artist(name: str) -> str:
     return n or name
 
 
+def _folder_fallback(path: Path) -> dict:
+    """If file is under Artist/Album/Title.mp3, use folder names as fallback."""
+    parent = path.parent.name if path.parent else ""
+    grand = path.parent.parent.name if path.parent and path.parent.parent else ""
+    # skip generic folder names
+    skip = {"", ".", "music", "processed", "staging", "unknown"}
+    artist = grand if grand.lower() not in skip else ""
+    album = parent if parent.lower() not in skip else ""
+    return {"folder_artist": artist, "folder_album": album}
+
+
 def _read_tags(path: Path) -> dict:
     """Read existing title/artist/album from ID3. Empty string if missing."""
     try:
@@ -77,10 +88,10 @@ def _write_tags(path: Path, title: str, artist: str, album: str, featured=None):
         if audio.tags is None:
             audio.add_tags()
         tags = audio.tags
-        tags["TIT2"] = TIT2(encoding=3, text=title)
-        tags["TPE1"] = TPE1(encoding=3, text=artist)
-        tags["TALB"] = TALB(encoding=3, text=album)
-        tags["TPE2"] = TPE2(encoding=3, text=artist)
+        tags["TIT2"] = TIT2(encoding=3, text=title or "Unknown")
+        tags["TPE1"] = TPE1(encoding=3, text=artist or "Unknown")
+        tags["TALB"] = TALB(encoding=3, text=album or title or "Unknown")
+        tags["TPE2"] = TPE2(encoding=3, text=artist or "Unknown")
         if featured:
             tags["TXXX:FEATURED"] = TXXX(encoding=3, desc="FEATURED", text=", ".join(featured))
         audio.save()
@@ -266,8 +277,17 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
     for f in mp3s:
         meta = parse_one(f)
         meta["path"] = str(f)
-        print(f"parsed: {f.name}  needs_llm={meta.get('needs_llm')}")
-        if meta.get("needs_llm"):
+        # folder structure fallback (Artist/Album/Title.mp3)
+        fb = _folder_fallback(f)
+        meta["folder_artist"] = fb["folder_artist"]
+        meta["folder_album"] = fb["folder_album"]
+        if not meta.get("artist") and fb["folder_artist"]:
+            meta["artist"] = fb["folder_artist"]
+        if not meta.get("album") and fb["folder_album"]:
+            meta["album"] = fb["folder_album"]
+        print(f"parsed: {f.name}  artist={meta.get('artist')}  needs_llm={meta.get('needs_llm')}")
+        if meta.get("needs_llm") and not meta.get("artist"):
+            # only send to LLM if we still have no artist
             llm_buf.append(meta)
             if len(llm_buf) >= LLM_BATCH_SIZE:
                 flush()
@@ -295,8 +315,20 @@ def _retag_one(meta):
         pass
 
     title = meta.get("title") or path.stem
-    artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "Unknown")
-    album = meta.get("album") or title
+    # priority: canonical > parsed > folder name > Unknown
+    artist = _clean_artist(
+        meta.get("artist_canonical")
+        or meta.get("artist")
+        or meta.get("folder_artist")
+        or "Unknown"
+    )
+    album = meta.get("album") or meta.get("folder_album") or title
+
+    # never write empty
+    if not artist or artist.lower() in ("", "none", "null"):
+        artist = meta.get("folder_artist") or "Unknown"
+    if not album:
+        album = title or "Unknown"
 
     _write_tags(path, title, artist, album, meta.get("featured"))
     print(f"tagged: {artist} - {title}  [{album}]")
