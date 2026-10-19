@@ -17,17 +17,22 @@ from config import (STAGING_DIR, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT,
 from regex_parser import parse_title
 from local_db import connect, lookup_artist, upsert_artist, normalize
 
-SYSTEM_PROMPT = """You are a music metadata expert. Given a YouTube video title,
-extract: song title, primary artist, featured artists (if any), album (if any).
+SYSTEM_PROMPT = """You are a music metadata expert. Given a YouTube video title (filename),
+extract the song title and primary artist. These two fields MUST always be populated.
+
 Rules:
+- ALWAYS return a non-empty "title" and "artist". Infer them from the filename.
 - Chinese titles: the part AFTER the dash/colon is usually the artist, BEFORE is the title.
 - "A-Lin" style hyphenated names are ONE artist, do not split.
 - If two or more artist names appear separated by feat/ft/with/by/翻唱/cover/原唱/&/,,
   list all of them; the first is primary.
-- If the title looks like it could be an artist name instead, say so in notes.
+- Album is optional. Only fill it if the filename clearly contains an album name.
+  Otherwise leave album as null (we will look it up later).
+- If the title looks like it could be an artist name instead, still pick the most likely split
+  and mention the ambiguity in notes.
 - Respond with ONLY a JSON array, no markdown fences. Each object:
-  {"raw": "...", "title": "...", "artist": "...", "featured": [...], "album": "...", "notes": "..."}
-- If unsure about a field, use null. Never invent data.
+  {"raw": "...", "title": "...", "artist": "...", "featured": [...], "album": null, "notes": "..."}
+- Never invent data. If truly unsure, still give your best guess for title and artist.
 """
 
 def _call_llm(batch):
@@ -95,12 +100,14 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
     out = _call_llm(batch)
     if out and len(out) == len(batch):
         for meta, llm_row in zip(batch, out):
+            # title and artist are required from LLM
             if llm_row.get("title"):
                 meta["title"] = llm_row["title"]
             if llm_row.get("artist"):
                 meta["artist"] = llm_row["artist"]
             if llm_row.get("featured"):
                 meta["featured"] = llm_row["featured"]
+            # album only if LLM explicitly found one
             if llm_row.get("album"):
                 meta["album"] = llm_row["album"]
             meta["needs_llm"] = False
