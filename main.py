@@ -74,13 +74,15 @@ def _read_tags(path: Path) -> dict:
             "title": _get("TIT2"),
             "artist": _get("TPE1"),
             "album": _get("TALB"),
+            "album_artist": _get("TPE2"),
         }
     except Exception:
-        return {"title": "", "artist": "", "album": ""}
+        return {"title": "", "artist": "", "album": "", "album_artist": ""}
 
 
-def _write_tags(path: Path, title: str, artist: str, album: str, featured=None):
-    """Write ID3 tags so Navidrome/other players see correct metadata."""
+def _write_tags(path: Path, title: str, artist: str, album: str,
+                album_artist: str = None, featured=None):
+    """Write ID3 tags. album_artist defaults to artist."""
     try:
         from mutagen.mp3 import MP3
         from mutagen.id3 import ID3, TIT2, TPE1, TALB, TPE2, TXXX
@@ -88,10 +90,11 @@ def _write_tags(path: Path, title: str, artist: str, album: str, featured=None):
         if audio.tags is None:
             audio.add_tags()
         tags = audio.tags
+        aa = album_artist or artist or "Unknown"
         tags["TIT2"] = TIT2(encoding=3, text=title or "Unknown")
         tags["TPE1"] = TPE1(encoding=3, text=artist or "Unknown")
         tags["TALB"] = TALB(encoding=3, text=album or title or "Unknown")
-        tags["TPE2"] = TPE2(encoding=3, text=artist or "Unknown")
+        tags["TPE2"] = TPE2(encoding=3, text=aa)
         if featured:
             tags["TXXX:FEATURED"] = TXXX(encoding=3, desc="FEATURED", text=", ".join(featured))
         audio.save()
@@ -110,11 +113,14 @@ def organize_one(meta):
 
     title = meta.get("title") or src.stem
     artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "Unknown")
-    album = meta.get("album") or title
+    # album: MusicBrainz > folder > title
+    album = meta.get("album") or meta.get("folder_album") or title
+    album_artist = meta.get("album_artist") or artist
 
     meta["title"] = title
     meta["artist_canonical"] = artist
     meta["album"] = album
+    meta["album_artist"] = album_artist
 
     safe = lambda s: "".join(c for c in s if c not in '/\\:*?"<>|').strip() or "Unknown"
     dest_dir = PROCESSED_DIR / safe(artist) / safe(album)
@@ -131,10 +137,9 @@ def organize_one(meta):
     if thumb.exists():
         process_cover(thumb, cover_dst)
 
-    _write_tags(dest, title, artist, album, meta.get("featured"))
+    _write_tags(dest, title, artist, album, album_artist, meta.get("featured"))
 
     meta["processed_path"] = str(dest)
-    # sidecar uses original stem so it stays next to the original filename
     sidecar = dest.with_suffix(".json")
     sidecar.write_text(json.dumps({
         "raw_youtube_title": meta.get("raw"),
@@ -144,6 +149,7 @@ def organize_one(meta):
         "featured": meta.get("featured"),
         "artist_canonical": artist,
         "album": album,
+        "album_artist": album_artist,
         "album_year": meta.get("album_year"),
         "confidence": meta.get("confidence"),
         "llm_notes": meta.get("llm_notes"),
@@ -158,6 +164,7 @@ def _process_ready(meta, kept, organized, lock):
     except Exception as e:
         print(f"enrich failed for {meta.get('file')}: {e}")
 
+    # album fallback: MusicBrainz result > title
     if not meta.get("album"):
         meta["album"] = meta.get("title") or "Unknown"
 
@@ -283,7 +290,6 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
     for f in mp3s:
         meta = parse_one(f)
         meta["path"] = str(f)
-        # folder structure fallback (Artist/Album/original_name.mp3)
         fb = _folder_fallback(f)
         meta["folder_artist"] = fb["folder_artist"]
         meta["folder_album"] = fb["folder_album"]
@@ -310,7 +316,9 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
 
 
 def _retag_one(meta):
-    """Enrich (if not already) and write tags in place. Force album.
+    """Enrich (if not already) and write tags in place.
+    Album comes from MusicBrainz if available, otherwise title.
+    Album artist is always set (defaults to artist).
     Does not rename the file.
     """
     path = Path(meta.get("path") or "")
@@ -328,14 +336,16 @@ def _retag_one(meta):
         or meta.get("folder_artist")
         or "Unknown"
     )
+    # album priority: MusicBrainz > folder > title
     album = meta.get("album") or meta.get("folder_album") or title
+    album_artist = meta.get("album_artist") or artist
 
     if not artist or artist.lower() in ("", "none", "null"):
         artist = meta.get("folder_artist") or "Unknown"
     if not album:
         album = title or "Unknown"
 
-    _write_tags(path, title, artist, album, meta.get("featured"))
+    _write_tags(path, title, artist, album, album_artist, meta.get("featured"))
     print(f"tagged: {artist} - {title}  [{album}]")
 
     sidecar = path.with_suffix(".json")
@@ -347,6 +357,7 @@ def _retag_one(meta):
         "featured": meta.get("featured"),
         "artist_canonical": artist,
         "album": album,
+        "album_artist": album_artist,
         "confidence": meta.get("confidence"),
         "llm_notes": meta.get("llm_notes"),
     }, ensure_ascii=False, indent=1), encoding="utf-8")
