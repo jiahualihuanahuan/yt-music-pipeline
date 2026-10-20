@@ -316,93 +316,59 @@ def run_parallel(target_url: str | None = None):
     return organized
 
 
-def reprocess_folder(folder: Path, only_missing: bool = False):
-    """Re-parse and retag MP3s under folder, in place.
-    If only_missing=True, skip files that already have title + artist + album.
-    Never renames files.
-    """
-    folder = folder.resolve()
-    if not folder.is_dir():
-        print(f"not a directory: {folder}")
-        return
-
-    all_mp3s = sorted(folder.rglob("*.mp3"))
-    if only_missing:
-        mp3s = []
-        for f in all_mp3s:
-            tags = _read_tags(f)
-            if not (tags["title"] and tags["artist"] and tags["album"]):
-                mp3s.append(f)
-        print(f"fill-missing: {len(mp3s)} / {len(all_mp3s)} files need tags")
-    else:
-        mp3s = all_mp3s
-        print(f"reprocess: {len(mp3s)} files under {folder}")
-
-    llm_buf = []
-    results = []
-
-    def flush():
-        nonlocal llm_buf
-        if not llm_buf:
-            return
-        apply_llm_batch(llm_buf)
-        for m in llm_buf:
-            if not m.get("artist") and m.get("folder_artist"):
-                m["artist"] = m["folder_artist"]
-            _retag_one(m)
-            results.append(m)
-        llm_buf = []
-
-    for f in mp3s:
-        meta = parse_one(f)
-        meta["path"] = str(f)
-        fb = _folder_fallback(f)
-        meta["folder_artist"] = fb["folder_artist"]
-        meta["folder_album"] = fb["folder_album"]
-        if not meta.get("album") and fb["folder_album"]:
-            meta["album"] = fb["folder_album"]
-
-        print(f"parsed: {f.name}  artist={meta.get('artist')}  needs_llm={meta.get('needs_llm')}")
-        if meta.get("needs_llm"):
-            llm_buf.append(meta)
-            if len(llm_buf) >= LLM_BATCH_SIZE:
-                flush()
-        else:
-            if not meta.get("artist") and fb["folder_artist"]:
-                meta["artist"] = fb["folder_artist"]
-            _retag_one(meta)
-            results.append(meta)
-
-    flush()
-    finalize_allowlist(results)
-    print(f"done: {len(results)} files")
+INVALID_ARTISTS = {"", "unknown", "unknown artist", "various artists", "va", "群星", "未知歌手", "none", "null"}
+INVALID_ALBUMS = {"", "unknown", "unknown album", "no album", "未知专辑", "none", "null"}
 
 
-def _retag_one(meta):
-    """Enrich and write tags in place. Never renames the file."""
+def _folder_fallback(path: Path) -> dict:
+    """Extract fallback artist/album from folder structure (Artist/Album/file.mp3 or Artist/file.mp3)."""
+    skip = {"", ".", "music", "processed", "staging", "unknown", "youtube", "downloads"}
+    parent = path.parent.name.strip() if path.parent else ""
+    grand = path.parent.parent.name.strip() if path.parent and path.parent.parent else ""
+
+    # If structure is Artist/Album/Track.mp3
+    if grand.lower() not in skip and parent.lower() not in skip:
+        return {"folder_artist": grand, "folder_album": parent}
+    # If structure is Artist/Track.mp3
+    if parent.lower() not in skip:
+        return {"folder_artist": parent, "folder_album": ""}
+    return {"folder_artist": "", "folder_album": ""}
+
+
+def _retag_one(meta: dict):
+    """Enrich and write all ID3 tags in place without renaming or moving the file."""
     path = Path(meta.get("path") or "")
     if not path.exists():
         return
+
     try:
         meta = enrich(meta)
     except Exception as e:
         print(f"enrich failed for {path.name}: {e}")
 
-    title = meta.get("title") or path.stem
-    artist = _clean_artist(
-        meta.get("artist_canonical")
-        or meta.get("artist")
-        or meta.get("folder_artist")
-        or "Unknown"
-    )
-    album = meta.get("album") or meta.get("folder_album") or title
-    album_artist = meta.get("album_artist") or artist
+    # 1. Clean Title (fallback to filename stem)
+    title = (meta.get("title") or path.stem).strip()
 
-    if not artist or artist.lower() in ("", "none", "null"):
-        artist = meta.get("folder_artist") or "Unknown"
-    if not album:
-        album = title or "Unknown"
+    # 2. Clean Artist (fallback to parent folder if missing or 'Unknown')
+    raw_artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "")
+    if raw_artist.lower() in INVALID_ARTISTS:
+        artist = _clean_artist(meta.get("folder_artist") or "Unknown")
+    else:
+        artist = raw_artist
 
+    # 3. Clean Album (fallback to folder album, then Title tag)
+    raw_album = (meta.get("album") or "").strip()
+    if raw_album.lower() in INVALID_ALBUMS:
+        folder_al = (meta.get("folder_album") or "").strip()
+        album = folder_al if (folder_al and folder_al != artist) else title
+    else:
+        album = raw_album
+
+    album_artist = (meta.get("album_artist") or "").strip()
+    if album_artist.lower() in INVALID_ARTISTS:
+        album_artist = artist
+
+    # Embed folder cover.jpg if present
     cover_path = path.parent / "cover.jpg"
     _write_tags(
         path,
@@ -414,7 +380,7 @@ def _retag_one(meta):
         year=meta.get("album_year"),
         cover_path=cover_path if cover_path.exists() else None,
     )
-    print(f"tagged: {artist} - {title}  [{album}]")
+    print(f"tagged: {artist} - {title}  [Album: {album}]")
 
     sidecar = path.with_suffix(".json")
     sidecar.write_text(json.dumps({
@@ -430,6 +396,62 @@ def _retag_one(meta):
         "confidence": meta.get("confidence"),
         "llm_notes": meta.get("llm_notes"),
     }, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def reprocess_folder(folder: Path, only_missing: bool = False):
+    """Scan all MP3s in a folder recursively and clean/populate all tags using pipeline logic."""
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+
+    all_mp3s = sorted(f for f in folder.rglob("*.mp3") if not f.name.startswith("."))
+    if only_missing:
+        mp3s = []
+        for f in all_mp3s:
+            tags = _read_tags(f)
+            has_valid_artist = tags["artist"].strip().lower() not in INVALID_ARTISTS
+            has_valid_album = tags["album"].strip().lower() not in INVALID_ALBUMS
+            has_valid_title = bool(tags["title"].strip())
+            if not (has_valid_title and has_valid_artist and has_valid_album):
+                mp3s.append(f)
+        print(f"fill-missing: {len(mp3s)} / {len(all_mp3s)} files need tag cleanup")
+    else:
+        mp3s = all_mp3s
+        print(f"reprocess: cleaning all {len(mp3s)} files under {folder}")
+
+    llm_buf = []
+    results = []
+
+    def flush():
+        nonlocal llm_buf
+        if not llm_buf:
+            return
+        apply_llm_batch(llm_buf)
+        for m in llm_buf:
+            _retag_one(m)
+            results.append(m)
+        llm_buf = []
+
+    for f in mp3s:
+        meta = parse_one(f)
+        meta["path"] = str(f)
+        fb = _folder_fallback(f)
+        meta["folder_artist"] = fb["folder_artist"]
+        meta["folder_album"] = fb["folder_album"]
+
+        print(f"parsed: {f.name}  artist={meta.get('artist')}  needs_llm={meta.get('needs_llm')}")
+        if meta.get("needs_llm"):
+            llm_buf.append(meta)
+            if len(llm_buf) >= LLM_BATCH_SIZE:
+                flush()
+        else:
+            _retag_one(meta)
+            results.append(meta)
+
+    flush()
+    finalize_allowlist(results)
+    print(f"done: cleaned and retagged {len(results)} files")
 
 
 def main():
