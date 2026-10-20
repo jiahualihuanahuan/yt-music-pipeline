@@ -186,7 +186,7 @@ def _validate(title: str, artist: str) -> bool:
     return False
 
 
-def parse_title(raw_title: str) -> dict:
+def parse_title(raw_title: str, info_meta: dict | None = None) -> dict:
     """Parse a raw YouTube title. Returns metadata dict."""
     cleaned, extra_feats, cover_artist = _strip_noise(raw_title)
     allowlist = _load_allowlist()

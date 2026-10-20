@@ -285,6 +285,13 @@ def _watch_and_process(stop_event: threading.Event, organized: list, lock: threa
     flush_llm()
     finalize_allowlist(all_parsed)
 
+    # Clean up any orphaned thumbnails/json from failed downloads where no .mp3 exists
+    for sidecar in STAGING_DIR.iterdir():
+        if sidecar.suffix.lower() in (".jpg", ".jpeg", ".webp", ".png", ".json", ".part", ".ytdl"):
+            mp3_sibling = sidecar.with_suffix(".mp3")
+            if not mp3_sibling.exists():
+                sidecar.unlink(missing_ok=True)
+
 def run_parallel(target_url: str | None = None):
     stop_event = threading.Event()
     organized = []

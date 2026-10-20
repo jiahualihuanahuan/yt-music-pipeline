@@ -72,10 +72,8 @@ COMMON_FLAGS = [
     f"--max-downloads={MAX_PLAYLIST_ITEMS}",
     "--no-playlist", "--ignore-errors", "--no-overwrites",
     "--windows-filenames",
-    # Prefer widely available clients; avoid ones that need PO tokens
-    "--extractor-args", "youtube:player_client=android,web",
-    # Permissive audio format so we don't fail when one type is missing
-    "-f", "bestaudio/best",
+    # Prioritize pure audio streams (m4a/opus) over format 18
+    "-f", "bestaudio[ext=m4a]/bestaudio/best",
     # Reduce 403s / YouTube blocks
     "--sleep-requests", "1",
     "--sleep-interval", "2",
@@ -88,11 +86,16 @@ COMMON_FLAGS = [
 if DENO_PATH:
     COMMON_FLAGS.extend(["--js-runtimes", f"deno:{DENO_PATH}"])
 
+BROWSER_COOKIES = getattr(cfg, "BROWSER_COOKIES", "chrome")
+
 if COOKIES_PATH.exists():
     COMMON_FLAGS.extend(["--cookies", str(COOKIES_PATH)])
-    print(f"Using cookies: {COOKIES_PATH}")
+    print(f"Using cookies file: {COOKIES_PATH}")
+elif BROWSER_COOKIES:
+    COMMON_FLAGS.extend(["--cookies-from-browser", BROWSER_COOKIES])
+    print(f"Using cookies from browser: {BROWSER_COOKIES}")
 else:
-    print("No cookies.txt found (optional). Place one in the project root to reduce 403s.")
+    print("No cookies configured.")
 
 
 def _run(query: str):

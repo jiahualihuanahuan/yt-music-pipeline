@@ -117,17 +117,41 @@ def _load_info_json(mp3_path: Path) -> dict | None:
     return None
 
 
-def parse_one(path: Path) -> dict:
-    """Parse a single mp3 by filename + optional yt-dlp .info.json sidecar."""
-    info = _load_info_json(path)
-    meta = parse_title(path.stem, info_meta=info)
-    meta["file"] = path.name
-    if info:
-        uploader = (info.get("artist") or info.get("creator") or info.get("uploader") or info.get("channel") or "").strip()
-        if uploader:
-            meta["channel_hint"] = uploader
-    return meta
+def _load_info_and_channel(mp3_path: Path) -> tuple[dict | None, str | None]:
+    """Load optional .info.json or read uploader/artist embedded by yt-dlp --add-metadata."""
+    info_path = mp3_path.with_suffix(".info.json")
+    if info_path.exists():
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            uploader = (info.get("artist") or info.get("creator") or info.get("uploader") or info.get("channel") or "").strip()
+            return info, (uploader or None)
+        except Exception:
+            pass
 
+    # Fallback: read TPE1 (uploader/channel) written by yt-dlp --add-metadata
+    try:
+        from mutagen.mp3 import MP3
+        audio = MP3(mp3_path)
+        if audio.tags and "TPE1" in audio.tags and audio.tags["TPE1"].text:
+            uploader = str(audio.tags["TPE1"].text[0]).strip()
+            if uploader and uploader.lower() != "unknown":
+                return None, uploader
+    except Exception:
+        pass
+    return None, None
+
+
+def parse_one(path: Path) -> dict:
+    """Parse a single mp3 by filename + optional yt-dlp metadata."""
+    info, channel_hint = _load_info_and_channel(path)
+    try:
+        meta = parse_title(path.stem, info_meta=info)
+    except TypeError:
+        meta = parse_title(path.stem)
+    meta["file"] = path.name
+    if channel_hint:
+        meta["channel_hint"] = channel_hint
+    return meta
 
 def apply_llm_batch(batch: list[dict]) -> list[dict]:
     """Send one batch to LLM and merge results back into the meta dicts by ID or raw match."""
