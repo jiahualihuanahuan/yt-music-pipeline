@@ -80,6 +80,8 @@ COMMON_FLAGS = [
     "--retries", "5",
     "--fragment-retries", "5",
     "--remote-components", "ejs:github",
+    # Prefer clients that work better with cookies
+    "--extractor-args", "youtube:player_client=web,web_safari,android",
     "-o", str(STAGING_DIR / "%(title)s.%(ext)s"),
 ]
 
@@ -96,11 +98,11 @@ if COOKIES_PATH.exists():
     print(f"Using cookies file: {COOKIES_PATH} (age: {age_days:.1f} days)")
     if age_days > 7:
         print("WARNING: cookies.txt is older than 7 days. YouTube may reject it.")
-        print("         Re-export from browser and replace the file.")
+        print("         Re-export from a private window and replace the file.")
 else:
     print(f"WARNING: cookies.txt not found at {COOKIES_PATH}")
     print("         YouTube will likely block downloads with 'Sign in to confirm you\u2019re not a bot'.")
-    print("         Export cookies.txt from your browser and place it there.")
+    print("         Export cookies from a private window (see README) and place it there.")
     if BROWSER_COOKIES:
         COMMON_FLAGS.extend(["--cookies-from-browser", BROWSER_COOKIES])
         print(f"Falling back to --cookies-from-browser {BROWSER_COOKIES}")
