@@ -5,7 +5,8 @@ variable you want to change. It is loaded at the bottom of this file.
 """
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+CODE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path("/Volumes/AI/music")
 
 # ---------- Paths ----------
 STAGING_DIR = BASE_DIR / "staging"          # raw yt-dlp downloads, original filenames kept
@@ -21,9 +22,9 @@ AUDIO_FORMAT = "mp3"
 AUDIO_QUALITY = "320"          # VBR ~320k
 MIN_DURATION = 90              # seconds; filters shorts/trailers
 MAX_DURATION = 600             # seconds; filters long mixes/lives
-MAX_PLAYLIST_ITEMS = 100       # max downloads per search query
-SEARCH_RESULTS = 20            # ytsearchN: how many results to inspect
-SEARCH_SLEEP = 2               # seconds between YouTube searches
+MAX_PLAYLIST_ITEMS = 1       # max downloads per search query
+SEARCH_RESULTS = 1            # ytsearchN: how many results to inspect
+SEARCH_SLEEP = 1               # seconds between YouTube searches
 
 # ---------- Search queries (keyword-based), weight = relative priority ----------
 # Appended with music-oriented terms so YouTube returns songs, not random videos
@@ -196,9 +197,9 @@ LLM_BATCH_SIZE = 15        # short titles; 3080 10GB + 9B Q4 has ~3GB headroom
 LLM_RETRIES = 2            # retry failed batches
 
 # ---------- API keys (optional) ----------
-LASTFM_API_KEY = ""
-SPOTIFY_CLIENT_ID = ""
-SPOTIFY_CLIENT_SECRET = ""
+LASTFM_API_KEY = "f205c5985189bf0a5bbac030e4dda140"
+SPOTIFY_CLIENT_ID = "2f59486b34844ea39f47fba56870c236"
+SPOTIFY_CLIENT_SECRET = "24f60614bf0344fd8f119ba0e2e99630"
 DISCOGS_TOKEN = ""
 
 # ---------- Misc ----------

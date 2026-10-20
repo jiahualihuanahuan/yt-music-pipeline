@@ -1,40 +1,42 @@
 """Search YouTube and download singles via yt-dlp.
 
-Uses keyword queries (SEARCH_QUERIES) and artist-name queries (ARTIST_QUERIES).
-Filters: duration range, playlist/compilation exclusion, download archive.
+Uses keyword queries (SEARCH_QUERIES), artist-name queries (ARTIST_QUERIES),
+and discovered allowlist artists (ALLOWLIST_PATH).
+Filters: duration range, live stream exclusion, download archive.
 
 Deno is required by yt-dlp for YouTube. This module finds it permanently
 (even after reinstalls) and passes the correct flags.
 """
+import json
 import os
 import random
 import shutil
 import subprocess
 import time
 from pathlib import Path
-from config import (SEARCH_QUERIES, ARTIST_QUERIES, STAGING_DIR, ARCHIVE_PATH,
-                    AUDIO_FORMAT, AUDIO_QUALITY, MIN_DURATION, MAX_DURATION,
-                    MAX_PLAYLIST_ITEMS, SEARCH_RESULTS, SEARCH_SLEEP, DRY_RUN,
-                    COOKIES_PATH)
+import config as cfg
+from config import (
+    SEARCH_QUERIES, ARTIST_QUERIES, ALLOWLIST_PATH, STAGING_DIR, ARCHIVE_PATH,
+    AUDIO_FORMAT, AUDIO_QUALITY, MIN_DURATION, MAX_DURATION,
+    MAX_PLAYLIST_ITEMS, SEARCH_RESULTS, SEARCH_SLEEP,
+    COOKIES_PATH,
+)
 
 STAGING_DIR.mkdir(parents=True, exist_ok=True)
 ARCHIVE_PATH.touch(exist_ok=True)
 
-# Duration filter via match-filters (yt-dlp has no --min-duration / --max-duration)
-DURATION_FILTER = f"duration >= {MIN_DURATION} & duration <= {MAX_DURATION}"
+# Duration + non-live filter via match-filters
+DURATION_FILTER = f"duration >= {MIN_DURATION} & duration <= {MAX_DURATION} & !is_live & !was_live"
 
 
 def _find_deno() -> str | None:
     """Locate deno permanently. Checks PATH then the standard install location."""
-    # 1. already on PATH
     found = shutil.which("deno")
     if found:
         return found
-    # 2. default install location used by the official installer
     default = Path.home() / ".deno" / "bin" / "deno"
     if default.is_file():
         return str(default)
-    # 3. common system locations
     for p in ("/usr/local/bin/deno", "/usr/bin/deno"):
         if Path(p).is_file():
             return p
@@ -62,11 +64,14 @@ else:
 COMMON_FLAGS = [
     "--extract-audio", f"--audio-format={AUDIO_FORMAT}",
     f"--audio-quality={AUDIO_QUALITY}",
-    "--embed-thumbnail", "--add-metadata",
+    # Write standalone .jpg to staging so artwork.py can crop 1:1 + add border
+    "--write-thumbnail", "--convert-thumbnails", "jpg",
+    "--add-metadata",
     f"--download-archive={ARCHIVE_PATH}",
     "--match-filters", DURATION_FILTER,
     f"--max-downloads={MAX_PLAYLIST_ITEMS}",
     "--no-playlist", "--ignore-errors", "--no-overwrites",
+    "--windows-filenames",
     # Prefer widely available clients; avoid ones that need PO tokens
     "--extractor-args", "youtube:player_client=android,web",
     # Permissive audio format so we don't fail when one type is missing
@@ -89,28 +94,23 @@ if COOKIES_PATH.exists():
 else:
     print("No cookies.txt found (optional). Place one in the project root to reduce 403s.")
 
-ARTWORK_FLAGS = ["--convert-thumbnails", "jpg"]
 
-
-def _run(query):
-    cmd = ["yt-dlp", f"ytsearch{SEARCH_RESULTS}:{query}", *COMMON_FLAGS, *ARTWORK_FLAGS]
+def _run(query: str):
+    cmd = ["yt-dlp", f"ytsearch{SEARCH_RESULTS}:{query}", *COMMON_FLAGS]
     print("SEARCH:", query)
-    if DRY_RUN:
+    if cfg.DRY_RUN:
         print("  (dry-run)")
         return
-    # ensure PATH includes deno for any subprocesses yt-dlp spawns
     env = os.environ.copy()
     subprocess.run(cmd, check=False, env=env)
     time.sleep(SEARCH_SLEEP + random.uniform(0, 1))
 
 
 def run_keyword_searches():
-    # weighted shuffle: higher weight = more likely early
     pool = []
     for q, w in SEARCH_QUERIES:
         pool.extend([q] * w)
     random.shuffle(pool)
-    # dedupe while preserving order
     seen = set()
     for q in pool:
         if q not in seen:
@@ -119,17 +119,44 @@ def run_keyword_searches():
 
 
 def run_artist_searches():
-    # rotate by weight; append music terms so we get songs, not interviews/vlogs
     pool = []
     for name, region, w in ARTIST_QUERIES:
-        pool.extend([name] * w)
+        pool.extend([(name, region)] * w)
     random.shuffle(pool)
     seen = set()
-    for name in pool:
+    for name, region in pool:
         if name not in seen:
             seen.add(name)
-            _run(f"{name} official audio OR lyrics OR 歌曲")
+            suffix = "歌曲 official" if region == "cn" else "official audio"
+            _run(f"{name} {suffix}")
 
+    # Also sample up to 15 newly discovered artists from allowlist
+    if ALLOWLIST_PATH.exists():
+        try:
+            allow = json.loads(ALLOWLIST_PATH.read_text(encoding="utf-8"))
+            new_artists = [a for a in allow if a not in seen]
+            for name in random.sample(new_artists, min(15, len(new_artists))):
+                _run(f"{name} official audio")
+        except Exception:
+            pass
+def download_url(url: str, max_items: int | None = None):
+    """Download a single playlist, channel, or video URL directly into STAGING_DIR."""
+    # Remove --no-playlist and --max-downloads from COMMON_FLAGS so the full playlist downloads
+    flags = [
+        f for f in COMMON_FLAGS
+        if f != "--no-playlist" and not f.startswith("--max-downloads=")
+    ]
+    flags.append("--yes-playlist")
+    if max_items:
+        flags.append(f"--max-downloads={max_items}")
+
+    cmd = ["yt-dlp", url, *flags]
+    print("DOWNLOAD URL:", url)
+    if cfg.DRY_RUN:
+        print("  (dry-run)")
+        return
+    env = os.environ.copy()
+    subprocess.run(cmd, check=False, env=env)
 
 def main():
     run_keyword_searches()
