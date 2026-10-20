@@ -86,16 +86,26 @@ COMMON_FLAGS = [
 if DENO_PATH:
     COMMON_FLAGS.extend(["--js-runtimes", f"deno:{DENO_PATH}"])
 
+# ---------- Cookies (cookies.txt takes priority) ----------
 BROWSER_COOKIES = getattr(cfg, "BROWSER_COOKIES", "chrome")
 
 if COOKIES_PATH.exists():
+    # Check file age as a rough freshness hint
+    age_days = (time.time() - COOKIES_PATH.stat().st_mtime) / 86400
     COMMON_FLAGS.extend(["--cookies", str(COOKIES_PATH)])
-    print(f"Using cookies file: {COOKIES_PATH}")
-elif BROWSER_COOKIES:
-    COMMON_FLAGS.extend(["--cookies-from-browser", BROWSER_COOKIES])
-    print(f"Using cookies from browser: {BROWSER_COOKIES}")
+    print(f"Using cookies file: {COOKIES_PATH} (age: {age_days:.1f} days)")
+    if age_days > 7:
+        print("WARNING: cookies.txt is older than 7 days. YouTube may reject it.")
+        print("         Re-export from browser and replace the file.")
 else:
-    print("No cookies configured.")
+    print(f"WARNING: cookies.txt not found at {COOKIES_PATH}")
+    print("         YouTube will likely block downloads with 'Sign in to confirm you\u2019re not a bot'.")
+    print("         Export cookies.txt from your browser and place it there.")
+    if BROWSER_COOKIES:
+        COMMON_FLAGS.extend(["--cookies-from-browser", BROWSER_COOKIES])
+        print(f"Falling back to --cookies-from-browser {BROWSER_COOKIES}")
+    else:
+        print("No browser cookies configured either. Downloads may fail.")
 
 
 def _run(query: str):
