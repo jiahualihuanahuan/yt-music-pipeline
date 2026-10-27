@@ -9,6 +9,8 @@ from config import LOCAL_DB_PATH
 
 _NORM_RE = re.compile(r"[\x5b\x5d(){}<>\u3010\u3011\u300a\u300b\u300c\u300d\u300e\u300f\u201c\u201d\u2018\u2019\"\'\s+]+")
 
+_warned = False
+
 
 def normalize(s):
     if not s:
@@ -19,10 +21,25 @@ def normalize(s):
 
 
 def connect():
-    conn = sqlite3.connect(LOCAL_DB_PATH)
+    """Open the local MusicBrainz cache. Falls back to in-memory DB if the path is unusable."""
+    global _warned
+    try:
+        LOCAL_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(LOCAL_DB_PATH)
+    except (OSError, sqlite3.OperationalError) as e:
+        if not _warned:
+            print(f"WARNING: cannot open local DB at {LOCAL_DB_PATH}: {e}")
+            print("         Using an in-memory cache for this run. Create config_local.py with a writable BASE_DIR for persistence.")
+            _warned = True
+        conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("PRAGMA foreign_keys=ON")
+    # Ensure schema exists even on the in-memory fallback
+    init_db(conn)
     return conn
 
 
