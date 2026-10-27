@@ -1,1 +1,1 @@
-$(python3 -c 'print(open("/tmp/main.py").read())')
+PLACEHOLDER_WILL_BE_REPLACED
