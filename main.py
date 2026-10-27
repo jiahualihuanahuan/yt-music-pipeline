@@ -7,6 +7,7 @@ Usage:
   python main.py --skip-dl                    # skip download phase, process existing staging
   python main.py --reprocess /path/to/music   # retag all MP3s in folder (in place)
   python main.py --fill-missing /path/to/music # only retag files missing title/artist/album
+  python main.py --llm-only /path/to/music    # force LLM inference only (overwrite tags, no regex)
 """
 import argparse
 import json
@@ -497,6 +498,68 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
     print(f"done: cleaned and retagged {len(results)} files")
 
 
+def llm_only_folder(folder: Path):
+    """Force LLM-only inference for every MP3 under folder. No regex parsing. Overwrites tags in place."""
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+
+    print(f"LLM-only mode: scanning {folder} ...")
+    all_mp3s = []
+    for i, f in enumerate(folder.rglob("*.mp3"), 1):
+        if f.name.startswith("."):
+            continue
+        all_mp3s.append(f)
+        if i % 500 == 0:
+            print(f"  scanned {i} files...")
+    all_mp3s.sort()
+    print(f"found {len(all_mp3s)} MP3s — sending all to LLM (no regex)")
+
+    llm_buf = []
+    results = []
+
+    def flush():
+        nonlocal llm_buf
+        if not llm_buf:
+            return
+        apply_llm_batch(llm_buf)
+        for m in llm_buf:
+            _retag_one(m)
+            results.append(m)
+        llm_buf = []
+
+    for f in all_mp3s:
+        # Minimal meta: only filename as raw input. Skip regex entirely.
+        meta = {
+            "raw": f.stem,
+            "file": f.name,
+            "path": str(f),
+            "needs_llm": True,
+        }
+        fb = _folder_fallback(f)
+        meta["folder_artist"] = fb["folder_artist"]
+        meta["folder_album"] = fb["folder_album"]
+
+        # Optional channel hint from existing tags or .info.json
+        try:
+            from parse_meta import _load_info_and_channel
+            _, channel = _load_info_and_channel(f)
+            if channel:
+                meta["channel_hint"] = channel
+        except Exception:
+            pass
+
+        print(f"queued for LLM: {f.name}")
+        llm_buf.append(meta)
+        if len(llm_buf) >= LLM_BATCH_SIZE:
+            flush()
+
+    flush()
+    finalize_allowlist(results)
+    print(f"done: LLM-tagged {len(results)} files")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -505,6 +568,8 @@ def main():
                     help="reparse + retag all MP3s under DIR in place")
     ap.add_argument("--fill-missing", type=str, metavar="DIR",
                     help="only retag MP3s missing title, artist, or album")
+    ap.add_argument("--llm-only", type=str, metavar="DIR",
+                    help="force LLM inference only (overwrite tags, skip regex parsing)")
     ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
@@ -520,6 +585,9 @@ def main():
     except Exception as e:
         print(f"WARNING: could not init local DB: {e}")
 
+    if args.llm_only:
+        llm_only_folder(Path(args.llm_only))
+        return
     if args.fill_missing:
         reprocess_folder(Path(args.fill_missing), only_missing=True)
         return
