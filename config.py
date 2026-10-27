@@ -69,7 +69,7 @@ ARTIST_QUERIES = [
     ("S.H.E", "cn", 6), ("苏打绿", "cn", 7), ("草东没有派对", "cn", 6),
     ("万能青年旅店", "cn", 6), ("朴树", "cn", 7), ("老狼", "cn", 6),
     ("信乐团", "cn", 6), ("动力火车", "cn", 6), ("宋冬野", "cn", 7),
-    ("赵雷", "cn", 7), ("马頴", "cn", 6), ("陈粒", "cn", 7),
+    ("赵雷", "cn", 7), ("马頹", "cn", 6), ("陈粒", "cn", 7),
     ("房东的猫", "cn", 6), ("花粥", "cn", 6), ("颜人中", "cn", 6),
     ("任然", "cn", 6), ("隔壁老樊", "cn", 6), ("程响", "cn", 6),
     ("A-Lin", "cn", 7), ("萧敬腾", "cn", 7), ("林宥嘉", "cn", 8),
@@ -189,9 +189,10 @@ ARTIST_QUERIES = [
 # ---------- Dedup ----------
 DEDUP_THRESHOLD = 85  # rapidfuzz score on "title + artist"; >= this = duplicate
 
-# ---------- LLM (local Qwen via OpenAI-compatible endpoint) ----------
-LLM_BASE_URL = "http://192.168.86.35:11434/v1"
-LLM_MODEL = "qwen3.5:9b"
+# ---------- LLM (vLLM OpenAI-compatible endpoint) ----------
+LLM_BASE_URL = "http://192.168.86.35:8001/v1"
+LLM_API_KEY = "vllm-secret-key"
+LLM_MODEL = "Qwen/Qwen3-8B-AWQ"  # must match the model name served by vLLM
 LLM_TIMEOUT = None         # no timeout; let local model finish
 LLM_BATCH_SIZE = 15        # short titles; 3080 10GB + 9B Q4 has ~3GB headroom
 LLM_RETRIES = 2            # retry failed batches
