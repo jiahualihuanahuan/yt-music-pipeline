@@ -17,18 +17,27 @@ from config import (
 from regex_parser import parse_title
 from local_db import connect, lookup_artist, normalize
 
-SYSTEM_PROMPT = """You are a music metadata expert. Given a JSON array of items containing a YouTube video title ("raw") and optional uploader channel ("channel"), extract the song title and primary artist.
+SYSTEM_PROMPT = """You are a music metadata expert. Given a JSON array of items, decide the correct tags.
+
+Each item may contain:
+- "id": integer you must echo back
+- "raw": YouTube video title / filename (primary signal)
+- "channel": optional uploader/channel hint
+- "existing_title", "existing_artist", "existing_album": current ID3 tags (may be wrong)
 
 Rules:
-- ALWAYS return a non-empty "title" and "artist" for every input "id".
-- Keep the exact "id" integer from the input object so results can be matched.
-- Chinese titles: the part AFTER the dash/colon is often the artist and BEFORE is the title, OR Artist《Title》. Use your knowledge of Chinese/Asian/Western artists and the "channel" hint to pick accurately.
-- "A-Lin", "G-Dragon", "j-hope", "(G)I-DLE" style hyphenated names are ONE artist, do not split.
-- If multiple artists appear (feat/ft/with/翻唱/cover/原唱/&/、), put the primary performer in "artist" and others in "featured" (array of strings).
-- Strip noise like "Official Music Video", "MV", "完整版", "歌词版", "Lyrics", "4K", "HD" from "title".
-- "album" is optional: set to null unless an album name is explicitly stated in the title.
-- Respond with ONLY a valid JSON array, no markdown fences, no commentary:
-  [{"id": 0, "title": "...", "artist": "...", "featured": [], "album": null, "notes": "..."}]
+- Only fill a field if you are confident it is correct.
+- If you are not confident, or the existing value is clearly wrong / nonsense / emoji / generic, return null for that field so it can be cleared.
+- Prefer correcting or clearing bad existing tags over guessing.
+- "title" and "artist" may be null if truly unknown. Do not invent.
+- Chinese titles: part AFTER dash/colon is often the artist and BEFORE is the title, OR Artist《Title》. Use knowledge + channel hint.
+- Hyphenated names like "A-Lin", "G-Dragon", "j-hope", "(G)I-DLE" are ONE artist.
+- Multiple artists (feat/ft/with/翻唱/cover/原唱/&/、): primary in "artist", others in "featured" (array). Empty array if none.
+- Strip noise: "Official Music Video", "MV", "完整版", "歌词版", "Lyrics", "4K", "HD".
+- "album" is optional: null unless an album name is explicitly present or you are sure. Never use emoji, "music", "unknown", etc.
+- Keep the exact "id".
+- Respond with ONLY a valid JSON array, no markdown, no commentary:
+  [{"id": 0, "title": "..." or null, "artist": "..." or null, "featured": [], "album": "..." or null, "notes": "..."}]
 """
 
 _THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
@@ -54,6 +63,13 @@ def _call_llm(batch: list[dict]) -> list[dict] | None:
         item = {"id": idx, "raw": b["raw"]}
         if b.get("channel_hint"):
             item["channel"] = b["channel_hint"]
+        # Pass existing tags so LLM can judge / clear them
+        if b.get("existing_title"):
+            item["existing_title"] = b["existing_title"]
+        if b.get("existing_artist"):
+            item["existing_artist"] = b["existing_artist"]
+        if b.get("existing_album"):
+            item["existing_album"] = b["existing_album"]
         req_items.append(item)
 
     payload = {
@@ -169,8 +185,22 @@ def parse_one(path: Path) -> dict:
         meta["channel_hint"] = channel_hint
     return meta
 
+
+def _clean_llm_field(val) -> str | None:
+    """Return stripped string, or None if LLM wants it cleared/empty."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if s.lower() in ("", "null", "none", "n/a", "na", "unknown"):
+        return None
+    return s
+
+
 def apply_llm_batch(batch: list[dict]) -> list[dict]:
-    """Send one batch to LLM and merge results back into the meta dicts by ID or raw match."""
+    """Send one batch to LLM and merge results back into the meta dicts by ID or raw match.
+
+    Null / empty from LLM means "clear or leave empty" (do not force a value).
+    """
     if not batch:
         return batch
     print(f"LLM batch: {len(batch)} items")
@@ -198,17 +228,24 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
             llm_row = out[idx]
 
         if llm_row:
-            if llm_row.get("title"):
-                meta["title"] = str(llm_row["title"]).strip()
-            if llm_row.get("artist"):
-                meta["artist"] = str(llm_row["artist"]).strip()
+            title = _clean_llm_field(llm_row.get("title"))
+            artist = _clean_llm_field(llm_row.get("artist"))
+            album = _clean_llm_field(llm_row.get("album"))
+
+            # Explicit null/empty clears the field
+            meta["title"] = title or ""
+            meta["artist"] = artist or ""
+            meta["album"] = album or ""
+
             if isinstance(llm_row.get("featured"), list):
-                meta["featured"] = [str(x).strip() for x in llm_row["featured"] if x]
-            if llm_row.get("album") and str(llm_row["album"]).lower() not in ("null", "none", ""):
-                meta["album"] = str(llm_row["album"]).strip()
-            meta["confidence"] = "medium"
+                meta["featured"] = [str(x).strip() for x in llm_row["featured"] if x and str(x).strip()]
+            else:
+                meta["featured"] = []
+
+            meta["confidence"] = "medium" if (title or artist) else "low"
             meta["needs_llm"] = False
             meta["llm_notes"] = llm_row.get("notes") or "llm_ok"
+            meta["llm_authoritative"] = True  # signal that empties should be respected
         else:
             meta["needs_llm"] = False
             meta["llm_notes"] = "llm_row_missing"
