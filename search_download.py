@@ -22,8 +22,15 @@ from config import (
     COOKIES_PATH,
 )
 
-STAGING_DIR.mkdir(parents=True, exist_ok=True)
-ARCHIVE_PATH.touch(exist_ok=True)
+def _ensure_dirs():
+    """Create staging and archive only when actually downloading."""
+    try:
+        STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        ARCHIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ARCHIVE_PATH.touch(exist_ok=True)
+    except OSError as e:
+        print(f"WARNING: could not create download dirs ({STAGING_DIR}): {e}")
+        print("         This is fine for --fill-missing / --reprocess. Override BASE_DIR in config_local.py for downloads.")
 
 # Duration + non-live filter via match-filters
 DURATION_FILTER = f"duration >= {MIN_DURATION} & duration <= {MAX_DURATION} & !is_live & !was_live"
@@ -111,6 +118,7 @@ else:
 
 
 def _run(query: str):
+    _ensure_dirs()
     cmd = ["yt-dlp", f"ytsearch{SEARCH_RESULTS}:{query}", *COMMON_FLAGS]
     print("SEARCH:", query)
     if cfg.DRY_RUN:
@@ -156,6 +164,7 @@ def run_artist_searches():
             pass
 def download_url(url: str, max_items: int | None = None):
     """Download a single playlist, channel, or video URL directly into STAGING_DIR."""
+    _ensure_dirs()
     # Remove --no-playlist and --max-downloads from COMMON_FLAGS so the full playlist downloads
     flags = [
         f for f in COMMON_FLAGS
@@ -174,6 +183,7 @@ def download_url(url: str, max_items: int | None = None):
     subprocess.run(cmd, check=False, env=env)
 
 def main():
+    _ensure_dirs()
     run_keyword_searches()
     run_artist_searches()
     print("download phase done")
