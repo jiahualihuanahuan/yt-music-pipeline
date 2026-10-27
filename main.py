@@ -131,8 +131,11 @@ def _write_tags(
     featured: list = None,
     year: str = None,
     cover_path: Path = None,
+    allow_clear: bool = False,
 ):
-    """Write ID3v2.4 tags including embedded cover art (APIC) and release year (TDRC)."""
+    """Write ID3v2.4 tags including embedded cover art (APIC) and release year (TDRC).
+    If allow_clear=True, empty strings remove the corresponding text tag instead of writing "Unknown".
+    """
     try:
         from mutagen.mp3 import MP3
         from mutagen.id3 import TIT2, TPE1, TALB, TPE2, TDRC, TXXX, APIC
@@ -140,15 +143,29 @@ def _write_tags(
         if audio.tags is None:
             audio.add_tags()
         tags = audio.tags
-        aa = album_artist or artist or "Unknown"
-        tags["TIT2"] = TIT2(encoding=3, text=title or "Unknown")
-        tags["TPE1"] = TPE1(encoding=3, text=artist or "Unknown")
-        tags["TALB"] = TALB(encoding=3, text=album or title or "Unknown")
-        tags["TPE2"] = TPE2(encoding=3, text=aa)
+
+        def _set_or_clear(key, frame_cls, value):
+            if value and str(value).strip():
+                tags[key] = frame_cls(encoding=3, text=str(value).strip())
+            elif allow_clear:
+                tags.delall(key)
+
+        _set_or_clear("TIT2", TIT2, title)
+        _set_or_clear("TPE1", TPE1, artist)
+        _set_or_clear("TALB", TALB, album)
+        aa = album_artist if (album_artist and str(album_artist).strip()) else (artist if artist else "")
+        _set_or_clear("TPE2", TPE2, aa)
+
         if year:
             tags["TDRC"] = TDRC(encoding=3, text=str(year))
+        elif allow_clear:
+            tags.delall("TDRC")
+
         if featured:
             tags["TXXX:FEATURED"] = TXXX(encoding=3, desc="FEATURED", text=", ".join(featured))
+        elif allow_clear:
+            tags.delall("TXXX:FEATURED")
+
         if cover_path and cover_path.exists():
             tags.delall("APIC")
             tags["APIC"] = APIC(
@@ -367,39 +384,55 @@ def _folder_fallback(path: Path) -> dict:
 
 
 def _retag_one(meta: dict):
-    """Enrich and write all ID3 tags in place without renaming or moving the file."""
+    """Enrich and write all ID3 tags in place without renaming or moving the file.
+    When meta["llm_authoritative"] is True, empty fields from the LLM are respected
+    (tags are cleared instead of filled with fallbacks).
+    """
     path = Path(meta.get("path") or "")
     if not path.exists():
         return
+
+    authoritative = bool(meta.get("llm_authoritative"))
 
     try:
         meta = enrich(meta)
     except Exception as e:
         print(f"enrich failed for {path.name}: {e}")
 
-    # 1. Clean Title (fallback to filename stem)
-    title = (meta.get("title") or path.stem).strip()
-
-    # 2. Clean Artist (fallback to parent folder if missing or 'Unknown')
-    raw_artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "")
-    if raw_artist.lower() in INVALID_ARTISTS:
-        artist = _clean_artist(meta.get("folder_artist") or "Unknown")
-    else:
-        artist = raw_artist
-
-    # 3. Clean Album: prefer real album, else folder, else title
-    raw_album = (meta.get("album") or "").strip()
-    folder_al = (meta.get("folder_album") or "").strip()
-    if not _is_invalid_album(raw_album) and raw_album.lower() != artist.lower():
-        album = raw_album
-    elif not _is_invalid_album(folder_al) and folder_al.lower() != artist.lower():
-        album = folder_al
-    else:
-        album = title
-
-    album_artist = (meta.get("album_artist") or "").strip()
-    if album_artist.lower() in INVALID_ARTISTS:
+    if authoritative:
+        # Respect LLM decisions, including empties (clear bad tags)
+        title = (meta.get("title") or "").strip()
+        artist = _clean_artist(meta.get("artist") or "")
+        album = (meta.get("album") or "").strip()
+        if _is_invalid_album(album):
+            album = ""
         album_artist = artist
+        allow_clear = True
+    else:
+        # 1. Clean Title (fallback to filename stem)
+        title = (meta.get("title") or path.stem).strip()
+
+        # 2. Clean Artist (fallback to parent folder if missing or 'Unknown')
+        raw_artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "")
+        if raw_artist.lower() in INVALID_ARTISTS:
+            artist = _clean_artist(meta.get("folder_artist") or "Unknown")
+        else:
+            artist = raw_artist
+
+        # 3. Clean Album: prefer real album, else folder, else title
+        raw_album = (meta.get("album") or "").strip()
+        folder_al = (meta.get("folder_album") or "").strip()
+        if not _is_invalid_album(raw_album) and raw_album.lower() != artist.lower():
+            album = raw_album
+        elif not _is_invalid_album(folder_al) and folder_al.lower() != artist.lower():
+            album = folder_al
+        else:
+            album = title
+
+        album_artist = (meta.get("album_artist") or "").strip()
+        if album_artist.lower() in INVALID_ARTISTS:
+            album_artist = artist
+        allow_clear = False
 
     # Embed folder cover.jpg if present
     cover_path = path.parent / "cover.jpg"
@@ -412,8 +445,12 @@ def _retag_one(meta: dict):
         featured=meta.get("featured"),
         year=meta.get("album_year"),
         cover_path=cover_path if cover_path.exists() else None,
+        allow_clear=allow_clear,
     )
-    print(f"tagged: {artist} - {title}  [Album: {album}]")
+    album_disp = album or "(cleared)"
+    artist_disp = artist or "(cleared)"
+    title_disp = title or "(cleared)"
+    print(f"tagged: {artist_disp} - {title_disp}  [Album: {album_disp}]")
 
     sidecar = path.with_suffix(".json")
     sidecar.write_text(json.dumps({
@@ -500,7 +537,9 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
 
 
 def llm_only_folder(folder: Path):
-    """Force LLM-only inference for every MP3 under folder. No regex parsing. Overwrites tags in place."""
+    """Force LLM-only inference for every MP3 under folder. No regex parsing. Overwrites tags in place.
+    LLM only fills tags it is confident about and can clear existing tags that do not make sense.
+    """
     folder = folder.resolve()
     if not folder.is_dir():
         print(f"not a directory: {folder}")
@@ -515,7 +554,7 @@ def llm_only_folder(folder: Path):
         if i % 500 == 0:
             print(f"  scanned {i} files...")
     all_mp3s.sort()
-    print(f"found {len(all_mp3s)} MP3s — sending all to LLM (no regex)")
+    print(f"found {len(all_mp3s)} MP3s — sending all to LLM (no regex, existing tags included)")
 
     llm_buf = []
     results = []
@@ -532,11 +571,16 @@ def llm_only_folder(folder: Path):
 
     for f in all_mp3s:
         # Minimal meta: only filename as raw input. Skip regex entirely.
+        # Also pass existing tags so the LLM can judge / clear them.
+        existing = _read_tags(f)
         meta = {
             "raw": f.stem,
             "file": f.name,
             "path": str(f),
             "needs_llm": True,
+            "existing_title": existing.get("title") or "",
+            "existing_artist": existing.get("artist") or "",
+            "existing_album": existing.get("album") or "",
         }
         fb = _folder_fallback(f)
         meta["folder_artist"] = fb["folder_artist"]
