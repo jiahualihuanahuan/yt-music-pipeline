@@ -2,7 +2,7 @@
 
 1. regex_parser (+ .info.json inspection) on every file
 2. collect needs_llm items into batches
-3. send batches to local Qwen 3.5 (OpenAI-compatible) with <think> stripping & ID alignment
+3. send batches to local vLLM (OpenAI-compatible) with <think> stripping & ID alignment
 4. merge + validate results, update allowlist
 """
 import json
@@ -12,7 +12,7 @@ import requests
 from pathlib import Path
 from config import (
     STAGING_DIR, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT,
-    LLM_BATCH_SIZE, LLM_RETRIES, ALLOWLIST_PATH,
+    LLM_BATCH_SIZE, LLM_RETRIES, ALLOWLIST_PATH, LLM_API_KEY,
 )
 from regex_parser import parse_title
 from local_db import connect, lookup_artist, normalize
@@ -65,10 +65,18 @@ def _call_llm(batch: list[dict]) -> list[dict] | None:
         "temperature": 0.1,
     }
     timeout = None if not LLM_TIMEOUT else LLM_TIMEOUT
+    headers = {}
+    if LLM_API_KEY:
+        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
     last_err = None
     for attempt in range(1, LLM_RETRIES + 1):
         try:
-            r = requests.post(f"{LLM_BASE_URL}/chat/completions", json=payload, timeout=timeout)
+            r = requests.post(
+                f"{LLM_BASE_URL}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
             r.raise_for_status()
             content = r.json()["choices"][0]["message"]["content"]
             parsed = _extract_json_array(content)
