@@ -53,6 +53,21 @@ INVALID_ARTISTS = {
 _JUNK_ALBUM_RE = re.compile(r"^[\s\W\u2600-\u27BF\U0001F300-\U0001F9FF]+$", re.UNICODE)
 
 
+def _enrich_album_first(meta: dict) -> dict:
+    """Try MusicBrainz / iTunes / Deezer for album (primary artist only).
+    If still missing/invalid and title exists, fall back to title.
+    """
+    try:
+        meta = enrich(meta)
+    except Exception as e:
+        print(f"enrich failed for {meta.get('file')}: {e}")
+    title = (meta.get("title") or "").strip()
+    album = (meta.get("album") or "").strip()
+    if _is_invalid_album(album) and title:
+        meta["album"] = title
+    return meta
+
+
 def _is_invalid_album(name: str) -> bool:
     """True if the album name is empty, generic, or pure symbols/emoji."""
     if not name:
@@ -323,8 +338,11 @@ def _watch_and_process(stop_event: threading.Event, organized: list, lock: threa
         for f in new_files:
             seen.add(f.name)
             meta = parse_one(f)
+            # MusicBrainz album first when we have title+artist
+            if meta.get("title") and meta.get("artist"):
+                meta = _enrich_album_first(meta)
             all_parsed.append(meta)
-            print(f"parsed: {f.name}  needs_llm={meta.get('needs_llm')}")
+            print(f"parsed: {f.name}  album={meta.get('album')}  needs_llm={meta.get('needs_llm')}")
             if meta.get("needs_llm"):
                 llm_buf.append(meta)
                 if len(llm_buf) >= LLM_BATCH_SIZE:
@@ -387,6 +405,7 @@ def _retag_one(meta: dict):
     """Enrich and write all ID3 tags in place without renaming or moving the file.
     When meta["llm_authoritative"] is True, empty fields from the LLM are respected
     (tags are cleared instead of filled with fallbacks).
+    Album always falls back to title when nothing else is available.
     """
     path = Path(meta.get("path") or "")
     if not path.exists():
@@ -523,8 +542,12 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
         meta["folder_artist"] = fb["folder_artist"]
         meta["folder_album"] = fb["folder_album"]
 
-        print(f"parsed: {f.name}  artist={meta.get('artist')}  needs_llm={meta.get('needs_llm')}")
-        if meta.get("needs_llm"):
+        # MusicBrainz / iTunes / Deezer for album first (primary artist only)
+        meta = _enrich_album_first(meta)
+
+        print(f"parsed: {f.name}  artist={meta.get('artist')}  album={meta.get('album')}  needs_llm={meta.get('needs_llm')}")
+        # LLM only if title/artist still need help
+        if meta.get("needs_llm") or not meta.get("title") or not meta.get("artist"):
             llm_buf.append(meta)
             if len(llm_buf) >= LLM_BATCH_SIZE:
                 flush()
@@ -539,7 +562,8 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
 
 def llm_only_folder(folder: Path):
     """Force LLM-only inference for every MP3 under folder. No regex parsing. Overwrites tags in place.
-    LLM only fills tags it is confident about and can clear existing tags that do not make sense.
+    MusicBrainz is tried first for album when title+artist already exist.
+    Album falls back to title if nothing else is found.
     """
     folder = folder.resolve()
     if not folder.is_dir():
@@ -579,6 +603,8 @@ def llm_only_folder(folder: Path):
             "file": f.name,
             "path": str(f),
             "needs_llm": True,
+            "title": existing.get("title") or "",
+            "artist": existing.get("artist") or "",
             "existing_title": existing.get("title") or "",
             "existing_artist": existing.get("artist") or "",
             "existing_album": existing.get("album") or "",
@@ -587,7 +613,7 @@ def llm_only_folder(folder: Path):
         meta["folder_artist"] = fb["folder_artist"]
         meta["folder_album"] = fb["folder_album"]
 
-        # Optional channel hint from existing tags or .info.json
+        # Optional channel hint
         try:
             from parse_meta import _load_info_and_channel
             _, channel = _load_info_and_channel(f)
@@ -595,6 +621,10 @@ def llm_only_folder(folder: Path):
                 meta["channel_hint"] = channel
         except Exception:
             pass
+
+        # Try MusicBrainz album first when we already have title+artist
+        if meta.get("title") and meta.get("artist"):
+            meta = _enrich_album_first(meta)
 
         print(f"queued for LLM: {f.name}")
         llm_buf.append(meta)
