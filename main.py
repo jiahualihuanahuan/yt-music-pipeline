@@ -13,6 +13,7 @@ import json
 import shutil
 import threading
 import time
+import re
 from pathlib import Path
 from datetime import datetime
 import glob
@@ -32,6 +33,36 @@ CHANNEL_NOISE = {
     "official", "channel", "topic", "vevo", "music", "records", "entertainment",
     "official audio", "official video", "official mv", "lyrics", "hd", "4k",
 }
+
+# Albums that should never be used; fall back to title
+INVALID_ALBUMS = {
+    "", "unknown", "unknown album", "no album", "未知专辑", "none", "null",
+    "music", "songs", "singles", "音乐", "歌曲", "专辑",
+    "🎵", "🎶", "🎧", "🎤", "🎸", "🎹", "🎼", "🎻", "🔊", "🎧", "🎵🎶",
+    "n/a", "na", "tbd", "various", "various artists", "va",
+}
+
+# Artists that should never be used
+INVALID_ARTISTS = {
+    "", "unknown", "unknown artist", "various artists", "va", "群星", "未知歌手", "none", "null",
+}
+
+# Regex: album is only punctuation, symbols, or emoji
+_JUNK_ALBUM_RE = re.compile(r"^[\s\W\u2600-\u27BF\U0001F300-\U0001F9FF]+$", re.UNICODE)
+
+
+def _is_invalid_album(name: str) -> bool:
+    """True if the album name is empty, generic, or pure symbols/emoji."""
+    if not name:
+        return True
+    n = name.strip().lower()
+    if n in INVALID_ALBUMS:
+        return True
+    if _JUNK_ALBUM_RE.match(name.strip()):
+        return True
+    if len(n) <= 1 and not n.isalnum():
+        return True
+    return False
 
 
 def _clean_artist(name: str) -> str:
@@ -142,6 +173,8 @@ def organize_one(meta):
     title = meta.get("title") or src.stem
     artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "Unknown")
     album = meta.get("album") or meta.get("folder_album") or title
+    if _is_invalid_album(album):
+        album = title
     album_artist = meta.get("album_artist") or artist
 
     meta["title"] = title
@@ -204,7 +237,7 @@ def _process_ready(meta, kept, organized, lock):
     except Exception as e:
         print(f"enrich failed for {meta.get('file')}: {e}")
 
-    if not meta.get("album"):
+    if _is_invalid_album(meta.get("album")):
         meta["album"] = meta.get("title") or "Unknown"
 
     with lock:
@@ -316,10 +349,6 @@ def run_parallel(target_url: str | None = None):
     return organized
 
 
-INVALID_ARTISTS = {"", "unknown", "unknown artist", "various artists", "va", "群星", "未知歌手", "none", "null"}
-INVALID_ALBUMS = {"", "unknown", "unknown album", "no album", "未知专辑", "none", "null"}
-
-
 def _folder_fallback(path: Path) -> dict:
     """Extract fallback artist/album from folder structure (Artist/Album/file.mp3 or Artist/file.mp3)."""
     skip = {"", ".", "music", "processed", "staging", "unknown", "youtube", "downloads"}
@@ -356,13 +385,15 @@ def _retag_one(meta: dict):
     else:
         artist = raw_artist
 
-    # 3. Clean Album (fallback to folder album, then Title tag)
+    # 3. Clean Album: prefer real album, else folder, else title
     raw_album = (meta.get("album") or "").strip()
-    if raw_album.lower() in INVALID_ALBUMS:
-        folder_al = (meta.get("folder_album") or "").strip()
-        album = folder_al if (folder_al and folder_al != artist) else title
-    else:
+    folder_al = (meta.get("folder_album") or "").strip()
+    if not _is_invalid_album(raw_album) and raw_album.lower() != artist.lower():
         album = raw_album
+    elif not _is_invalid_album(folder_al) and folder_al.lower() != artist.lower():
+        album = folder_al
+    else:
+        album = title
 
     album_artist = (meta.get("album_artist") or "").strip()
     if album_artist.lower() in INVALID_ARTISTS:
@@ -421,7 +452,7 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
         for i, f in enumerate(all_mp3s, 1):
             tags = _read_tags(f)
             has_valid_artist = tags["artist"].strip().lower() not in INVALID_ARTISTS
-            has_valid_album = tags["album"].strip().lower() not in INVALID_ALBUMS
+            has_valid_album = not _is_invalid_album(tags["album"])
             has_valid_title = bool(tags["title"].strip())
             if not (has_valid_title and has_valid_artist and has_valid_album):
                 mp3s.append(f)
@@ -478,21 +509,16 @@ def main():
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
 
-    # Only create LOG_DIR / init DB when the default paths are usable.
-    # --fill-missing / --reprocess can run on any folder without the Mac BASE_DIR.
-    need_local_dirs = not (args.fill_missing or args.reprocess)
-    if need_local_dirs:
-        try:
-            LOG_DIR.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            print(f"WARNING: could not create LOG_DIR {LOG_DIR}: {e}")
-        try:
-            init_db()
-            print("local DB stats:", stats())
-        except OSError as e:
-            print(f"WARNING: could not init local DB: {e}")
-    else:
-        print("fill-missing / reprocess mode: skipping default staging/processed/log paths")
+    # Always try to init the local DB (path is now platform-safe)
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"WARNING: could not create LOG_DIR {LOG_DIR}: {e}")
+    try:
+        init_db()
+        print("local DB stats:", stats())
+    except Exception as e:
+        print(f"WARNING: could not init local DB: {e}")
 
     if args.fill_missing:
         reprocess_folder(Path(args.fill_missing), only_missing=True)
