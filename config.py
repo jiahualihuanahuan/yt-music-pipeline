@@ -2,11 +2,37 @@
 
 Local overrides: create config_local.py (gitignored) and redefine any
 variable you want to change. It is loaded at the bottom of this file.
+
+Default data directory is platform-agnostic and always writable:
+  - Prefer /Volumes/AI/music if it exists (Mac development setup)
+  - Otherwise fall back to ~/yt-music-pipeline
+Override BASE_DIR in config_local.py to point at your music library or a
+custom data root on any OS.
 """
+import os
+import sys
 from pathlib import Path
 
 CODE_DIR = Path(__file__).resolve().parent
-BASE_DIR = Path("/Volumes/AI/music")
+
+def _default_base_dir() -> Path:
+    """Pick a writable default data root that works on Mac and Linux."""
+    # Preferred Mac development path
+    mac_preferred = Path("/Volumes/AI/music")
+    if mac_preferred.exists() and os.access(mac_preferred, os.W_OK):
+        return mac_preferred
+    # Cross-platform fallback under the user's home
+    home_fallback = Path.home() / "yt-music-pipeline"
+    try:
+        home_fallback.mkdir(parents=True, exist_ok=True)
+        if os.access(home_fallback, os.W_OK):
+            return home_fallback
+    except OSError:
+        pass
+    # Last resort: next to the code (always writable if the repo is)
+    return CODE_DIR / "data"
+
+BASE_DIR = _default_base_dir()
 
 # ---------- Paths ----------
 STAGING_DIR = BASE_DIR / "staging"          # raw yt-dlp downloads, original filenames kept
@@ -213,3 +239,12 @@ try:
     from config_local import *  # type: ignore
 except ImportError:
     pass
+
+# Re-resolve paths if BASE_DIR was overridden in config_local.py
+STAGING_DIR = BASE_DIR / "staging"
+PROCESSED_DIR = BASE_DIR / "processed"
+ALLOWLIST_PATH = BASE_DIR / "artist_allowlist.json"
+ARCHIVE_PATH = BASE_DIR / "downloaded.txt"
+LOG_DIR = BASE_DIR / "logs"
+LOCAL_DB_PATH = BASE_DIR / "musicbrainz_cache.db"
+COOKIES_PATH = BASE_DIR / "cookies.txt"
