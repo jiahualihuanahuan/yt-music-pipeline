@@ -466,9 +466,21 @@ def main():
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
 
-    LOG_DIR.mkdir(exist_ok=True)
-    init_db()
-    print("local DB stats:", stats())
+    # Only create LOG_DIR / init DB when the default paths are usable.
+    # --fill-missing / --reprocess can run on any folder without the Mac BASE_DIR.
+    need_local_dirs = not (args.fill_missing or args.reprocess)
+    if need_local_dirs:
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"WARNING: could not create LOG_DIR {LOG_DIR}: {e}")
+        try:
+            init_db()
+            print("local DB stats:", stats())
+        except OSError as e:
+            print(f"WARNING: could not init local DB: {e}")
+    else:
+        print("fill-missing / reprocess mode: skipping default staging/processed/log paths")
 
     if args.fill_missing:
         reprocess_folder(Path(args.fill_missing), only_missing=True)
@@ -506,9 +518,13 @@ def main():
         "llm_used": sum(1 for m in organized if m.get("llm_notes") is not None),
     }
     print(json.dumps(summary, indent=1, ensure_ascii=False))
-    (LOG_DIR / f"run_{datetime.now():%Y%m%d_%H%M%S}.json").write_text(
-        json.dumps(summary, indent=1, ensure_ascii=False), encoding="utf-8"
-    )
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        (LOG_DIR / f"run_{datetime.now():%Y%m%d_%H%M%S}.json").write_text(
+            json.dumps(summary, indent=1, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
