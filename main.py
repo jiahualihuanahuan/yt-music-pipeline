@@ -405,16 +405,28 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
         print(f"not a directory: {folder}")
         return
 
-    all_mp3s = sorted(f for f in folder.rglob("*.mp3") if not f.name.startswith("."))
+    print(f"scanning for MP3s under {folder} ...")
+    all_mp3s = []
+    for i, f in enumerate(folder.rglob("*.mp3"), 1):
+        if f.name.startswith("."):
+            continue
+        all_mp3s.append(f)
+        if i % 500 == 0:
+            print(f"  scanned {i} files...")
+    all_mp3s.sort()
+    print(f"found {len(all_mp3s)} MP3s")
+
     if only_missing:
         mp3s = []
-        for f in all_mp3s:
+        for i, f in enumerate(all_mp3s, 1):
             tags = _read_tags(f)
             has_valid_artist = tags["artist"].strip().lower() not in INVALID_ARTISTS
             has_valid_album = tags["album"].strip().lower() not in INVALID_ALBUMS
             has_valid_title = bool(tags["title"].strip())
             if not (has_valid_title and has_valid_artist and has_valid_album):
                 mp3s.append(f)
+            if i % 200 == 0:
+                print(f"  checked tags on {i}/{len(all_mp3s)} ... ({len(mp3s)} missing so far)")
         print(f"fill-missing: {len(mp3s)} / {len(all_mp3s)} files need tag cleanup")
     else:
         mp3s = all_mp3s
