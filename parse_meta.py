@@ -199,7 +199,8 @@ def _clean_llm_field(val) -> str | None:
 def apply_llm_batch(batch: list[dict]) -> list[dict]:
     """Send one batch to LLM and merge results back into the meta dicts by ID or raw match.
 
-    Title and artist may be left empty. Album falls back to title when missing.
+    Title and artist may be left empty. Album: keep MusicBrainz value if present,
+    otherwise LLM value, otherwise fall back to title.
     """
     if not batch:
         return batch
@@ -236,8 +237,12 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
             meta["title"] = title or ""
             meta["artist"] = artist or ""
 
-            # Album: use LLM value if present, otherwise fall back to title
-            meta["album"] = album or (title or "")
+            # Album: keep MusicBrainz/existing album if valid; else LLM; else title
+            existing_album = (meta.get("album") or "").strip()
+            if existing_album and existing_album.lower() not in ("", "null", "none", "unknown", "unknown album"):
+                meta["album"] = existing_album
+            else:
+                meta["album"] = album or (title or "")
 
             if isinstance(llm_row.get("featured"), list):
                 meta["featured"] = [str(x).strip() for x in llm_row["featured"] if x and str(x).strip()]
