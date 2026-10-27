@@ -400,14 +400,15 @@ def _retag_one(meta: dict):
         print(f"enrich failed for {path.name}: {e}")
 
     if authoritative:
-        # Respect LLM decisions, including empties (clear bad tags)
+        # Title and artist may stay empty (LLM not confident).
+        # Album always falls back to title when missing/invalid.
         title = (meta.get("title") or "").strip()
         artist = _clean_artist(meta.get("artist") or "")
         album = (meta.get("album") or "").strip()
         if _is_invalid_album(album):
-            album = ""
+            album = title  # fall back to title
         album_artist = artist
-        allow_clear = True
+        allow_clear = True  # still allow clearing title/artist
     else:
         # 1. Clean Title (fallback to filename stem)
         title = (meta.get("title") or path.stem).strip()
