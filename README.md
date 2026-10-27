@@ -3,6 +3,9 @@
 Automated YouTube music library builder. Searches, downloads, tags, dedupes,
 and organizes singles into a clean local library with proper metadata.
 
+Works on macOS and Linux. Data paths are chosen automatically and can be
+overridden.
+
 ## Pipeline
 
 ```
@@ -35,7 +38,7 @@ and organized — no need to wait for the whole download phase to finish.
 | `dedup.py` | rapidfuzz similarity dedup (also incremental) |
 | `artwork.py` | 1:1 crop + border, JPG |
 | `artist_seed.py` | Region helpers for artist lists |
-| `main.py` | Full orchestrator: parallel by default, `--dry-run` / `--skip-dl` |
+| `main.py` | Full orchestrator: parallel by default, `--dry-run` / `--skip-dl` / `--fill-missing` / `--reprocess` |
 | `setup_deno.sh` | One-time Deno install + PATH setup (required by yt-dlp for YouTube) |
 
 ## Quick start
@@ -49,6 +52,27 @@ python main.py --dry-run      # test search + parse
 python main.py                # full parallel run
 ```
 
+## Data directory (Mac + Linux)
+
+The pipeline stores its working files (staging, processed, logs, local SQLite DB, allowlist, cookies) under `BASE_DIR`.
+
+**Default behavior (no config_local.py needed):**
+- If `/Volumes/AI/music` exists and is writable (typical Mac setup) → use it.
+- Otherwise → create and use `~/yt-music-pipeline` (works on Linux and Mac).
+
+You can always override it. Create `config_local.py` (gitignored):
+
+```python
+from pathlib import Path
+BASE_DIR = Path("/mnt/data/docker/navidrome")   # or any writable path
+# optional other overrides
+LLM_BASE_URL = "http://192.168.86.35:8001/v1"
+LLM_API_KEY = "vllm-secret-key"
+LLM_MODEL = "Qwen/Qwen3-8B-AWQ"
+```
+
+The local MusicBrainz cache (`musicbrainz_cache.db`) is created automatically under `BASE_DIR` the first time it is needed.
+
 ## Resume after interrupt
 
 If downloads finished (or partially finished) but post-processing was killed:
@@ -60,6 +84,18 @@ python main.py --skip-dl
 This skips the download phase and processes whatever is still in `staging/`.
 Files already moved to `processed/` are left alone.
 
+## Fill missing tags / reprocess existing library
+
+```bash
+# Only retag files missing title, artist, or album (in place)
+python main.py --fill-missing /path/to/your/music
+
+# Force retag everything under a folder (in place)
+python main.py --reprocess /path/to/your/music
+```
+
+These modes do not require the download staging directory. They only need a writable `BASE_DIR` for the local DB and allowlist.
+
 ## Local config overrides
 
 Do **not** edit `config.py` directly if you want painless `git pull`s.
@@ -67,6 +103,8 @@ Create `config_local.py` (gitignored) and override any setting:
 
 ```python
 # config_local.py
+from pathlib import Path
+BASE_DIR = Path("/Volumes/AI/music")   # or Linux path
 MAX_PLAYLIST_ITEMS = 50
 LLM_BATCH_SIZE = 3
 LLM_BASE_URL = "http://192.168.86.35:8001/v1"
