@@ -38,7 +38,7 @@ and organized — no need to wait for the whole download phase to finish.
 | `dedup.py` | rapidfuzz similarity dedup (also incremental) |
 | `artwork.py` | 1:1 crop + border, JPG |
 | `artist_seed.py` | Region helpers for artist lists |
-| `main.py` | Full orchestrator: parallel by default, `--dry-run` / `--skip-dl` / `--fill-missing` / `--reprocess` / `--llm-only` |
+| `main.py` | Full orchestrator: parallel by default, `--dry-run` / `--skip-dl` / `--fill-missing` / `--reprocess` / `--llm-only` / `--remove-tags` |
 | `setup_deno.sh` | One-time Deno install + PATH setup (required by yt-dlp for YouTube) |
 
 ## Quick start
@@ -95,11 +95,15 @@ python main.py --reprocess /path/to/your/music
 
 # Force LLM-only inference (skip regex, overwrite all tags)
 python main.py --llm-only /path/to/your/music
+
+# Strip all ID3 tags (leaves audio intact)
+python main.py --remove-tags /path/to/your/music
 ```
 
 These modes do not require the download staging directory. They only need a writable `BASE_DIR` for the local DB and allowlist.
 
 `--llm-only` sends every filename directly to the LLM with no regex parsing and overwrites the tags in place.
+`--remove-tags` deletes all ID3 tags from the files.
 
 ## Local config overrides
 
