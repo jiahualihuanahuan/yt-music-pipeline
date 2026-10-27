@@ -99,7 +99,11 @@ def _update_allowlist(artist_names):
         except Exception:
             pass
     added = set()
-    db = connect()
+    try:
+        db = connect()
+    except Exception as e:
+        print(f"allowlist update skipped (db unavailable): {e}")
+        return
     try:
         for name in artist_names:
             n = normalize(name)
@@ -111,8 +115,12 @@ def _update_allowlist(artist_names):
     finally:
         db.close()
     if added:
-        ALLOWLIST_PATH.write_text(json.dumps(sorted(existing), ensure_ascii=False, indent=1), encoding="utf-8")
-        print(f"allowlist +{len(added)}: {sorted(added)[:10]}")
+        try:
+            ALLOWLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+            ALLOWLIST_PATH.write_text(json.dumps(sorted(existing), ensure_ascii=False, indent=1), encoding="utf-8")
+            print(f"allowlist +{len(added)}: {sorted(added)[:10]}")
+        except OSError as e:
+            print(f"allowlist write skipped ({ALLOWLIST_PATH}): {e}")
 
 
 def _load_info_json(mp3_path: Path) -> dict | None:
