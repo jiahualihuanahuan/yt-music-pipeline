@@ -34,7 +34,7 @@ Rules:
 - Hyphenated names like "A-Lin", "G-Dragon", "j-hope", "(G)I-DLE" are ONE artist.
 - Multiple artists (feat/ft/with/翻唱/cover/原唱/&/、): primary in "artist", others in "featured" (array). Empty array if none.
 - Strip noise: "Official Music Video", "MV", "完整版", "歌词版", "Lyrics", "4K", "HD".
-- "album" is optional: null unless an album name is explicitly present or you are sure. Never use emoji, "music", "unknown", etc.
+- "album": if you are not sure of a real album name, return null. The pipeline will fall back to the song title. Never return emoji, "music", "unknown", etc.
 - Keep the exact "id".
 - Respond with ONLY a valid JSON array, no markdown, no commentary:
   [{"id": 0, "title": "..." or null, "artist": "..." or null, "featured": [], "album": "..." or null, "notes": "..."}]
@@ -199,7 +199,7 @@ def _clean_llm_field(val) -> str | None:
 def apply_llm_batch(batch: list[dict]) -> list[dict]:
     """Send one batch to LLM and merge results back into the meta dicts by ID or raw match.
 
-    Null / empty from LLM means "clear or leave empty" (do not force a value).
+    Title and artist may be left empty. Album falls back to title when missing.
     """
     if not batch:
         return batch
@@ -232,10 +232,12 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
             artist = _clean_llm_field(llm_row.get("artist"))
             album = _clean_llm_field(llm_row.get("album"))
 
-            # Explicit null/empty clears the field
+            # Title and artist may stay empty
             meta["title"] = title or ""
             meta["artist"] = artist or ""
-            meta["album"] = album or ""
+
+            # Album: use LLM value if present, otherwise fall back to title
+            meta["album"] = album or (title or "")
 
             if isinstance(llm_row.get("featured"), list):
                 meta["featured"] = [str(x).strip() for x in llm_row["featured"] if x and str(x).strip()]
