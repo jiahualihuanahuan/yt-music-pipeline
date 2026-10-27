@@ -69,7 +69,9 @@ Create `config_local.py` (gitignored) and override any setting:
 # config_local.py
 MAX_PLAYLIST_ITEMS = 50
 LLM_BATCH_SIZE = 3
-LLM_BASE_URL = "http://192.168.86.35:11434/v1"
+LLM_BASE_URL = "http://192.168.86.35:8001/v1"
+LLM_API_KEY = "vllm-secret-key"
+LLM_MODEL = "Qwen/Qwen3-8B-AWQ"
 ```
 
 ## YouTube 403 / bot checks
@@ -111,13 +113,15 @@ MusicBrainz, iTunes, Deezer, Cover Art Archive need no key.
 
 ## Local LLM
 
-Points at `http://192.168.86.35:11434/v1` (Qwen 3.5 9B) by default.
+Points at `http://192.168.86.35:8001/v1` (vLLM serving Qwen/Qwen3-8B-AWQ) by default.
+Requires the API key `vllm-secret-key` (Bearer token).
 Only suspicious/failed regex parses go to the LLM.
 
 Current defaults (tune in `config_local.py`):
 
-- `LLM_BATCH_SIZE = 5`
-- `LLM_TIMEOUT = 300`
+- `LLM_MODEL = "Qwen/Qwen3-8B-AWQ"`
+- `LLM_BATCH_SIZE = 15`
+- `LLM_TIMEOUT = None` (no timeout)
 - `LLM_RETRIES = 2`
 
 If the LLM is unreachable or times out, the regex result is kept and processing continues.
