@@ -29,16 +29,34 @@ Rules:
 - Only fill a field if you are confident it is correct.
 - If you are not confident, or the existing value is clearly wrong / nonsense / emoji / generic, return null for that field so it can be cleared.
 - Prefer correcting or clearing bad existing tags over guessing.
-- "title" and "artist" may be null if truly unknown. Do not invent.
+- "title" and "artist" are nullable: return null if truly unknown. Do not invent.
 - Chinese titles: part AFTER dash/colon is often the artist and BEFORE is the title, OR Artist《Title》. Use knowledge + channel hint.
 - Hyphenated names like "A-Lin", "G-Dragon", "j-hope", "(G)I-DLE" are ONE artist.
 - Multiple artists (feat/ft/with/翻唱/cover/原唱/&/、): primary in "artist", others in "featured" (array). Empty array if none.
 - Strip noise: "Official Music Video", "MV", "完整版", "歌词版", "Lyrics", "4K", "HD".
-- "album": if you are not sure of a real album name, return null. The pipeline will fall back to the song title. Never return emoji, "music", "unknown", etc.
+- "album" is nullable: return null if unsure. The pipeline will fall back to the song title. Never return emoji, "music", "unknown", etc.
 - Keep the exact "id".
 - Respond with ONLY a valid JSON array, no markdown, no commentary:
-  [{"id": 0, "title": "..." or null, "artist": "..." or null, "featured": [], "album": "..." or null, "notes": "..."}]
+  [{"id": 0, "title": "..." or null, "artist": "..." or null, "featured": [], "album": "..." or null, "notes": "..." or null}]
 """
+
+# Explicit nullable schema so the model can omit or null fields
+LLM_RESPONSE_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "integer"},
+            "title": {"type": ["string", "null"]},
+            "artist": {"type": ["string", "null"]},
+            "featured": {"type": "array", "items": {"type": "string"}},
+            "album": {"type": ["string", "null"]},
+            "notes": {"type": ["string", "null"]},
+        },
+        "required": ["id"],
+        "additionalProperties": False,
+    },
+}
 
 _THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 _JSON_ARRAY_RE = re.compile(r"\[[\s\S]*\]")
@@ -79,6 +97,15 @@ def _call_llm(batch: list[dict]) -> list[dict] | None:
             {"role": "user", "content": json.dumps(req_items, ensure_ascii=False)},
         ],
         "temperature": 0.1,
+        # Nullable schema: title/artist/album may be null
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "music_tags",
+                "schema": LLM_RESPONSE_SCHEMA,
+                "strict": False,
+            },
+        },
     }
     timeout = None if not LLM_TIMEOUT else LLM_TIMEOUT
     headers = {}
@@ -187,7 +214,7 @@ def parse_one(path: Path) -> dict:
 
 
 def _clean_llm_field(val) -> str | None:
-    """Return stripped string, or None if LLM wants it cleared/empty."""
+    """Return stripped string, or None if LLM wants it cleared/empty (nullable)."""
     if val is None:
         return None
     s = str(val).strip()
@@ -199,8 +226,8 @@ def _clean_llm_field(val) -> str | None:
 def apply_llm_batch(batch: list[dict]) -> list[dict]:
     """Send one batch to LLM and merge results back into the meta dicts by ID or raw match.
 
-    Title and artist may be left empty. Album: keep MusicBrainz value if present,
-    otherwise LLM value, otherwise fall back to title.
+    Title and artist are nullable (may stay empty / be cleared).
+    Album: keep MusicBrainz value if present, otherwise LLM value, otherwise fall back to title.
     """
     if not batch:
         return batch
@@ -233,7 +260,7 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
             artist = _clean_llm_field(llm_row.get("artist"))
             album = _clean_llm_field(llm_row.get("album"))
 
-            # Title and artist may stay empty
+            # Title and artist are nullable — empty string means clear
             meta["title"] = title or ""
             meta["artist"] = artist or ""
 
