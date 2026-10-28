@@ -275,7 +275,11 @@ def _index_llm_output(out: list, batch: list[dict]) -> dict:
 
 
 def _apply_row(meta: dict, llm_row: dict):
-    """Merge one LLM row into meta."""
+    """Merge one LLM row into meta.
+
+    Album: use LLM value only if it looks like a real album name.
+    Otherwise always fall back to title (best guess when unsure).
+    """
     title = _clean_llm_field(llm_row.get("title"))
     artist = _clean_llm_field(llm_row.get("artist"))
     album = _clean_llm_field(llm_row.get("album"))
@@ -283,11 +287,23 @@ def _apply_row(meta: dict, llm_row: dict):
     meta["title"] = title or ""
     meta["artist"] = artist or ""
 
-    existing_album = (meta.get("album") or "").strip()
-    if existing_album and existing_album.lower() not in ("", "null", "none", "unknown", "unknown album"):
-        meta["album"] = existing_album
+    # Noise that means the "album" is really a filename / video title
+    noise = ("official", "music video", "mv", "完整版", "官方", "高清", "歌词版", "lyric video")
+    def _messy(s: str) -> bool:
+        if not s:
+            return True
+        low = s.lower()
+        if any(n in low for n in noise):
+            return True
+        if len(s) > 60:
+            return True
+        return False
+
+    # Prefer a clean LLM album; otherwise copy title
+    if album and not _messy(album):
+        meta["album"] = album
     else:
-        meta["album"] = album or (title or "")
+        meta["album"] = title or ""
 
     if isinstance(llm_row.get("featured"), list):
         meta["featured"] = [str(x).strip() for x in llm_row["featured"] if x and str(x).strip()]
