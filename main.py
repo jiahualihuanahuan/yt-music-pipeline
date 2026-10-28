@@ -70,8 +70,16 @@ def _enrich_album_first(meta: dict) -> dict:
     return meta
 
 
+# Filename noise that means this is not a real album name
+_ALBUM_NOISE_RE = re.compile(
+    r"(official\s*(music\s*)?(video|audio|mv|lyric\s*video)|"
+    r"\bmv\b|完整版|官方|高清|歌词版|lyric\s*video|music\s*video|"
+    r"片头曲|片尾曲|插曲|主题曲|主題曲|戲劇版|戏剧版)",
+    re.I,
+)
+
 def _is_invalid_album(name: str) -> bool:
-    """True if the album name is empty, generic, or pure symbols/emoji."""
+    """True if the album name is empty, generic, pure symbols, or looks like a filename."""
     if not name:
         return True
     n = name.strip().lower()
@@ -80,6 +88,11 @@ def _is_invalid_album(name: str) -> bool:
     if _JUNK_ALBUM_RE.match(name.strip()):
         return True
     if len(n) <= 1 and not n.isalnum():
+        return True
+    # Filename-like: contains video/MV noise, or is very long
+    if _ALBUM_NOISE_RE.search(name):
+        return True
+    if len(n) > 60:
         return True
     return False
 
@@ -442,14 +455,16 @@ def _retag_one(meta: dict):
 
     if authoritative:
         # Title and artist may stay empty (LLM not confident).
-        # Album always falls back to title when missing/invalid.
+        # Album: use only a clean real album; otherwise always copy title.
         title = (meta.get("title") or "").strip()
         artist = _clean_artist(meta.get("artist") or "")
         album = (meta.get("album") or "").strip()
-        if _is_invalid_album(album):
-            album = title  # fall back to title
+        # Prefer title whenever album is missing, noisy, or equals the raw filename
+        raw = (meta.get("raw") or "").strip()
+        if _is_invalid_album(album) or (raw and album == raw) or (title and album == title):
+            album = title
         album_artist = artist
-        allow_clear = True  # still allow clearing title/artist
+        allow_clear = True
     else:
         # 1. Clean Title (fallback to filename stem)
         title = (meta.get("title") or path.stem).strip()
