@@ -95,11 +95,11 @@ ARTIST_QUERIES = [
     ("S.H.E", "cn", 6), ("苏打绿", "cn", 7), ("草东没有派对", "cn", 6),
     ("万能青年旅店", "cn", 6), ("朴树", "cn", 7), ("老狼", "cn", 6),
     ("信乐团", "cn", 6), ("动力火车", "cn", 6), ("宋冬野", "cn", 7),
-    ("赵雷", "cn", 7), ("马頹", "cn", 6), ("陈粒", "cn", 7),
+    ("赵雷", "cn", 7), ("马頓", "cn", 6), ("陈粒", "cn", 7),
     ("房东的猫", "cn", 6), ("花粥", "cn", 6), ("颜人中", "cn", 6),
     ("任然", "cn", 6), ("隔壁老樊", "cn", 6), ("程响", "cn", 6),
     ("A-Lin", "cn", 7), ("萧敬腾", "cn", 7), ("林宥嘉", "cn", 8),
-    ("徐佳莹", "cn", 7), ("卢广仲", "cn", 7), ("魏如萱", "cn", 6),
+    ("徐佳莹", "cn", 7), ("卢广伸", "cn", 7), ("魏如萱", "cn", 6),
     ("9m88", "cn", 6), ("持修", "cn", 6), ("茄子蛋", "cn", 6),
     ("美秀集团", "cn", 6), ("灭火器", "cn", 6),
 
@@ -222,6 +222,15 @@ LLM_MODEL = "Qwen/Qwen3-8B-AWQ"  # must match the model name served by vLLM
 LLM_TIMEOUT = None         # no timeout; let local model finish
 LLM_BATCH_SIZE = 15        # short titles; 3080 10GB + 9B Q4 has ~3GB headroom
 LLM_RETRIES = 2            # retry failed batches
+
+# ---------- SearXNG (local web search for LLM context) ----------
+# Must have json format enabled in settings.yml:
+#   search:
+#     formats:
+#       - html
+#       - json
+SEARXNG_BASE_URL = "http://192.168.86.35:8099"
+SEARXNG_MAX_RESULTS = 5
 
 # ---------- API keys (optional) ----------
 LASTFM_API_KEY = "f205c5985189bf0a5bbac030e4dda140"
