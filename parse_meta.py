@@ -2,8 +2,8 @@
 
 1. regex_parser (+ .info.json inspection) on every file
 2. collect needs_llm items into batches
-3. query local SearXNG for web context
-4. send batches to local vLLM (OpenAI-compatible) with <think> stripping & ID alignment
+3. first LLM pass: title-only (no search)
+4. second LLM pass: SearXNG only for items where LLM left title/artist empty
 5. merge + validate results, update allowlist
 """
 import json
@@ -26,14 +26,14 @@ Each item may contain:
 - "raw": YouTube video title / filename (primary signal)
 - "channel": optional uploader/channel hint
 - "existing_title", "existing_artist", "existing_album": current ID3 tags (may be wrong)
-- "web_search": optional short list of web snippets (title + content). Use these to confirm artist, title, and album when available.
+- "web_search": optional short list of web snippets (title + content). Present ONLY when a previous pass was unsure. Use them to fill fields you would otherwise leave null.
 
 Rules:
-- Only fill a field if you are confident it is correct. Prefer web_search evidence over guessing.
+- Only fill a field if you are confident it is correct.
 - If you are not confident, or the existing value is clearly wrong / nonsense / emoji / generic, return null for that field so it can be cleared.
 - Prefer correcting or clearing bad existing tags over guessing.
 - "title" and "artist" are nullable: return null if truly unknown. Do not invent.
-- Chinese titles: part AFTER dash/colon is often the artist and BEFORE is the title, OR Artist《Title》. Use knowledge + channel hint + web_search.
+- Chinese titles: part AFTER dash/colon is often the artist and BEFORE is the title, OR Artist《Title》. Use knowledge + channel hint.
 - Hyphenated names like "A-Lin", "G-Dragon", "j-hope", "(G)I-DLE" are ONE artist.
 - Multiple artists (feat/ft/with/翻唱/cover/原唱/&/、): primary in "artist", others in "featured" (array). Empty array if none.
 - Strip noise: "Official Music Video", "MV", "完整版", "歌词版", "Lyrics", "4K", "HD".
@@ -82,7 +82,6 @@ def _searxng_search(query: str, max_results: int = 3) -> list[dict]:
             title = (item.get("title") or "").strip()
             content = (item.get("content") or "").strip()
             if title or content:
-                # Keep snippets short so the LLM payload stays small
                 results.append({
                     "title": title[:120],
                     "content": content[:180],
@@ -98,19 +97,18 @@ def _searxng_search(query: str, max_results: int = 3) -> list[dict]:
 def _build_search_query(item: dict) -> str:
     """Build a short search query from raw title."""
     raw = (item.get("raw") or "").strip()
-    # Strip common noise to improve search quality
     raw = re.sub(r"[\(\[].*?(lyrics|official|mv|hd|4k).*?[\)\]]", "", raw, flags=re.I)
     raw = re.sub(r"\s+", " ", raw).strip()
     return raw[:120]
 
 
-def _call_llm(batch: list[dict]) -> list[dict] | None:
+def _call_llm(batch: list[dict], use_search: bool = False) -> list[dict] | None:
+    """Call the LLM. Search is only attached when use_search=True."""
     req_items = []
     for idx, b in enumerate(batch):
         item = {"id": idx, "raw": b["raw"]}
         if b.get("channel_hint"):
             item["channel"] = b["channel_hint"]
-        # Pass existing tags so LLM can judge / clear them
         if b.get("existing_title"):
             item["existing_title"] = b["existing_title"]
         if b.get("existing_artist"):
@@ -118,18 +116,17 @@ def _call_llm(batch: list[dict]) -> list[dict] | None:
         if b.get("existing_album"):
             item["existing_album"] = b["existing_album"]
 
-        # Web search context from local SearXNG (short snippets only)
-        query = _build_search_query(item)
-        if query:
-            hits = _searxng_search(query, min(SEARXNG_MAX_RESULTS, 3))
-            if hits:
-                item["web_search"] = hits
-                print(f"  SearXNG: {len(hits)} hits for {query!r}")
+        # Only search when the caller says the LLM was unsure
+        if use_search:
+            query = _build_search_query(item)
+            if query:
+                hits = _searxng_search(query, min(SEARXNG_MAX_RESULTS, 3))
+                if hits:
+                    item["web_search"] = hits
+                    print(f"  SearXNG (unsure): {len(hits)} hits for {query!r}")
 
         req_items.append(item)
 
-    # No response_format: many vLLM builds return 400 for json_schema.
-    # The prompt already asks for a pure JSON array.
     payload = {
         "model": LLM_MODEL,
         "messages": [
@@ -221,7 +218,6 @@ def _load_info_and_channel(mp3_path: Path) -> tuple[dict | None, str | None]:
         except Exception:
             pass
 
-    # Fallback: read TPE1 (uploader/channel) written by yt-dlp --add-metadata
     try:
         from mutagen.mp3 import MP3
         audio = MP3(mp3_path)
@@ -257,26 +253,8 @@ def _clean_llm_field(val) -> str | None:
     return s
 
 
-def apply_llm_batch(batch: list[dict]) -> list[dict]:
-    """Send one batch to LLM and merge results back into the meta dicts by ID or raw match.
-
-    Title and artist are nullable (may stay empty / be cleared).
-    Album: keep MusicBrainz value if present, otherwise LLM value, otherwise fall back to title.
-    SearXNG web results are included in the prompt when available.
-    If the LLM call fails, items are marked llm_failed and should not be written.
-    """
-    if not batch:
-        return batch
-    print(f"LLM batch: {len(batch)} items")
-    out = _call_llm(batch)
-    if not out:
-        for meta in batch:
-            meta["needs_llm"] = False
-            meta["llm_notes"] = "llm_failed"
-            meta["llm_authoritative"] = False
-        return batch
-
-    # Index LLM output by 'id' and fallback 'raw'
+def _index_llm_output(out: list, batch: list[dict]) -> dict:
+    """Map LLM rows by id, with raw-title fallback."""
     by_id = {}
     by_raw = {}
     for row in out:
@@ -286,41 +264,89 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
             by_id[row["id"]] = row
         if "raw" in row:
             by_raw[row["raw"]] = row
-
+    result = {}
     for idx, meta in enumerate(batch):
-        llm_row = by_id.get(idx) or by_raw.get(meta["raw"])
-        if not llm_row and len(out) == len(batch) and isinstance(out[idx], dict):
-            llm_row = out[idx]
+        row = by_id.get(idx) or by_raw.get(meta.get("raw"))
+        if not row and len(out) == len(batch) and isinstance(out[idx], dict):
+            row = out[idx]
+        if row:
+            result[idx] = row
+    return result
 
-        if llm_row:
-            title = _clean_llm_field(llm_row.get("title"))
-            artist = _clean_llm_field(llm_row.get("artist"))
-            album = _clean_llm_field(llm_row.get("album"))
 
-            # Title and artist are nullable — empty string means clear
-            meta["title"] = title or ""
-            meta["artist"] = artist or ""
+def _apply_row(meta: dict, llm_row: dict):
+    """Merge one LLM row into meta."""
+    title = _clean_llm_field(llm_row.get("title"))
+    artist = _clean_llm_field(llm_row.get("artist"))
+    album = _clean_llm_field(llm_row.get("album"))
 
-            # Album: keep MusicBrainz/existing album if valid; else LLM; else title
-            existing_album = (meta.get("album") or "").strip()
-            if existing_album and existing_album.lower() not in ("", "null", "none", "unknown", "unknown album"):
-                meta["album"] = existing_album
-            else:
-                meta["album"] = album or (title or "")
+    meta["title"] = title or ""
+    meta["artist"] = artist or ""
 
-            if isinstance(llm_row.get("featured"), list):
-                meta["featured"] = [str(x).strip() for x in llm_row["featured"] if x and str(x).strip()]
-            else:
-                meta["featured"] = []
+    existing_album = (meta.get("album") or "").strip()
+    if existing_album and existing_album.lower() not in ("", "null", "none", "unknown", "unknown album"):
+        meta["album"] = existing_album
+    else:
+        meta["album"] = album or (title or "")
 
-            meta["confidence"] = "medium" if (title or artist) else "low"
+    if isinstance(llm_row.get("featured"), list):
+        meta["featured"] = [str(x).strip() for x in llm_row["featured"] if x and str(x).strip()]
+    else:
+        meta["featured"] = []
+
+    meta["confidence"] = "medium" if (title or artist) else "low"
+    meta["needs_llm"] = False
+    meta["llm_notes"] = llm_row.get("notes") or "llm_ok"
+    meta["llm_authoritative"] = True
+
+
+def apply_llm_batch(batch: list[dict]) -> list[dict]:
+    """Two-pass LLM tagging.
+
+    Pass 1: title only (no search). Fill what the model is confident about.
+    Pass 2: only for items where title or artist is still empty — search then re-ask.
+    Album falls back to title when missing.
+    If the LLM call fails, items are marked llm_failed and should not be written.
+    """
+    if not batch:
+        return batch
+    print(f"LLM batch: {len(batch)} items (title-only first)")
+
+    # ---- Pass 1: title only ----
+    out = _call_llm(batch, use_search=False)
+    if not out:
+        for meta in batch:
             meta["needs_llm"] = False
-            meta["llm_notes"] = llm_row.get("notes") or "llm_ok"
-            meta["llm_authoritative"] = True  # signal that empties should be respected
-        else:
+            meta["llm_notes"] = "llm_failed"
+            meta["llm_authoritative"] = False
+        return batch
+
+    rows = _index_llm_output(out, batch)
+    unsure = []
+    for idx, meta in enumerate(batch):
+        row = rows.get(idx)
+        if not row:
             meta["needs_llm"] = False
             meta["llm_notes"] = "llm_row_missing"
             meta["llm_authoritative"] = False
+            continue
+        _apply_row(meta, row)
+        # Unsure if title or artist is still empty
+        if not meta.get("title") or not meta.get("artist"):
+            unsure.append((idx, meta))
+
+    # ---- Pass 2: search only for unsure items ----
+    if unsure:
+        print(f"  {len(unsure)} items unsure — searching then re-asking")
+        unsure_batch = [m for _, m in unsure]
+        out2 = _call_llm(unsure_batch, use_search=True)
+        if out2:
+            rows2 = _index_llm_output(out2, unsure_batch)
+            for local_idx, (orig_idx, meta) in enumerate(unsure):
+                row2 = rows2.get(local_idx)
+                if row2:
+                    _apply_row(meta, row2)
+                    meta["llm_notes"] = (row2.get("notes") or "llm_ok") + " (with search)"
 
     return batch
 
