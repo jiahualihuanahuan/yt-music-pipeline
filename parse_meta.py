@@ -2,8 +2,9 @@
 
 1. regex_parser (+ .info.json inspection) on every file
 2. collect needs_llm items into batches
-3. send batches to local vLLM (OpenAI-compatible) with <think> stripping & ID alignment
-4. merge + validate results, update allowlist
+3. query local SearXNG for web context
+4. send batches to local vLLM (OpenAI-compatible) with <think> stripping & ID alignment
+5. merge + validate results, update allowlist
 """
 import json
 import re
@@ -13,6 +14,7 @@ from pathlib import Path
 from config import (
     STAGING_DIR, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT,
     LLM_BATCH_SIZE, LLM_RETRIES, ALLOWLIST_PATH, LLM_API_KEY,
+    SEARXNG_BASE_URL, SEARXNG_MAX_RESULTS,
 )
 from regex_parser import parse_title
 from local_db import connect, lookup_artist, normalize
@@ -24,13 +26,14 @@ Each item may contain:
 - "raw": YouTube video title / filename (primary signal)
 - "channel": optional uploader/channel hint
 - "existing_title", "existing_artist", "existing_album": current ID3 tags (may be wrong)
+- "web_search": optional list of web snippets from SearXNG (title, url, content). Use these to confirm artist, title, and album when available.
 
 Rules:
-- Only fill a field if you are confident it is correct.
+- Only fill a field if you are confident it is correct. Prefer web_search evidence over guessing.
 - If you are not confident, or the existing value is clearly wrong / nonsense / emoji / generic, return null for that field so it can be cleared.
 - Prefer correcting or clearing bad existing tags over guessing.
 - "title" and "artist" are nullable: return null if truly unknown. Do not invent.
-- Chinese titles: part AFTER dash/colon is often the artist and BEFORE is the title, OR Artist《Title》. Use knowledge + channel hint.
+- Chinese titles: part AFTER dash/colon is often the artist and BEFORE is the title, OR Artist《Title》. Use knowledge + channel hint + web_search.
 - Hyphenated names like "A-Lin", "G-Dragon", "j-hope", "(G)I-DLE" are ONE artist.
 - Multiple artists (feat/ft/with/翻唱/cover/原唱/&/、): primary in "artist", others in "featured" (array). Empty array if none.
 - Strip noise: "Official Music Video", "MV", "完整版", "歌词版", "Lyrics", "4K", "HD".
@@ -75,6 +78,63 @@ def _extract_json_array(text: str) -> list:
         raise
 
 
+def _searxng_search(query: str, max_results: int = 5) -> list[dict]:
+    """Query local SearXNG and return top results as {title, url, content}."""
+    if not query or not SEARXNG_BASE_URL:
+        return []
+    url = f"{SEARXNG_BASE_URL.rstrip('/')}/search"
+    try:
+        r = requests.get(
+            url,
+            params={"q": query, "format": "json"},
+            headers={"User-Agent": "yt-music-pipeline/1.0"},
+            timeout=12,
+        )
+        if r.status_code == 403:
+            print(f"SearXNG JSON disabled (403). Enable formats: [html, json] in settings.yml")
+            return []
+        r.raise_for_status()
+        data = r.json()
+        results = []
+        for item in data.get("results") or []:
+            title = (item.get("title") or "").strip()
+            url_ = (item.get("url") or "").strip()
+            content = (item.get("content") or "").strip()
+            if title or content:
+                results.append({
+                    "title": title[:200],
+                    "url": url_[:200],
+                    "content": content[:400],
+                })
+            if len(results) >= max_results:
+                break
+        return results
+    except Exception as e:
+        print(f"SearXNG search failed for {query!r}: {e}")
+        return []
+
+
+def _build_search_query(item: dict) -> str:
+    """Build a search query from raw title + existing tags."""
+    parts = []
+    raw = (item.get("raw") or "").strip()
+    if raw:
+        parts.append(raw)
+    for key in ("existing_title", "existing_artist"):
+        v = (item.get(key) or "").strip()
+        if v and v.lower() not in ("unknown", "null", "none"):
+            parts.append(v)
+    # Deduplicate while preserving order
+    seen = set()
+    out = []
+    for p in parts:
+        low = p.lower()
+        if low not in seen:
+            seen.add(low)
+            out.append(p)
+    return " ".join(out)[:200]
+
+
 def _call_llm(batch: list[dict]) -> list[dict] | None:
     req_items = []
     for idx, b in enumerate(batch):
@@ -88,6 +148,15 @@ def _call_llm(batch: list[dict]) -> list[dict] | None:
             item["existing_artist"] = b["existing_artist"]
         if b.get("existing_album"):
             item["existing_album"] = b["existing_album"]
+
+        # Web search context from local SearXNG
+        query = _build_search_query(item)
+        if query:
+            hits = _searxng_search(query, SEARXNG_MAX_RESULTS)
+            if hits:
+                item["web_search"] = hits
+                print(f"  SearXNG: {len(hits)} hits for {query!r}")
+
         req_items.append(item)
 
     payload = {
@@ -228,6 +297,7 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
 
     Title and artist are nullable (may stay empty / be cleared).
     Album: keep MusicBrainz value if present, otherwise LLM value, otherwise fall back to title.
+    SearXNG web results are included in the prompt when available.
     """
     if not batch:
         return batch
