@@ -424,7 +424,11 @@ def _retag_one(meta: dict):
     When meta["llm_authoritative"] is True, empty fields from the LLM are respected
     (tags are cleared instead of filled with fallbacks).
     Album always falls back to title when nothing else is available.
+    Skip writing if the LLM call failed (avoid garbage fallback tags).
     """
+    if meta.get("llm_notes") == "llm_failed":
+        print(f"skip (LLM failed): {meta.get('file') or meta.get('path')}")
+        return
     path = Path(meta.get("path") or "")
     if not path.exists():
         return
