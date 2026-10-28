@@ -26,7 +26,7 @@ Each item may contain:
 - "raw": YouTube video title / filename (primary signal)
 - "channel": optional uploader/channel hint
 - "existing_title", "existing_artist", "existing_album": current ID3 tags (may be wrong)
-- "web_search": optional list of web snippets from SearXNG (title, url, content). Use these to confirm artist, title, and album when available.
+- "web_search": optional short list of web snippets (title + content). Use these to confirm artist, title, and album when available.
 
 Rules:
 - Only fill a field if you are confident it is correct. Prefer web_search evidence over guessing.
@@ -42,24 +42,6 @@ Rules:
 - Respond with ONLY a valid JSON array, no markdown, no commentary:
   [{"id": 0, "title": "..." or null, "artist": "..." or null, "featured": [], "album": "..." or null, "notes": "..." or null}]
 """
-
-# Explicit nullable schema so the model can omit or null fields
-LLM_RESPONSE_SCHEMA = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "id": {"type": "integer"},
-            "title": {"type": ["string", "null"]},
-            "artist": {"type": ["string", "null"]},
-            "featured": {"type": "array", "items": {"type": "string"}},
-            "album": {"type": ["string", "null"]},
-            "notes": {"type": ["string", "null"]},
-        },
-        "required": ["id"],
-        "additionalProperties": False,
-    },
-}
 
 _THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 _JSON_ARRAY_RE = re.compile(r"\[[\s\S]*\]")
@@ -78,8 +60,8 @@ def _extract_json_array(text: str) -> list:
         raise
 
 
-def _searxng_search(query: str, max_results: int = 5) -> list[dict]:
-    """Query local SearXNG and return top results as {title, url, content}."""
+def _searxng_search(query: str, max_results: int = 3) -> list[dict]:
+    """Query local SearXNG and return top results as {title, content}."""
     if not query or not SEARXNG_BASE_URL:
         return []
     url = f"{SEARXNG_BASE_URL.rstrip('/')}/search"
@@ -98,13 +80,12 @@ def _searxng_search(query: str, max_results: int = 5) -> list[dict]:
         results = []
         for item in data.get("results") or []:
             title = (item.get("title") or "").strip()
-            url_ = (item.get("url") or "").strip()
             content = (item.get("content") or "").strip()
             if title or content:
+                # Keep snippets short so the LLM payload stays small
                 results.append({
-                    "title": title[:200],
-                    "url": url_[:200],
-                    "content": content[:400],
+                    "title": title[:120],
+                    "content": content[:180],
                 })
             if len(results) >= max_results:
                 break
@@ -115,24 +96,12 @@ def _searxng_search(query: str, max_results: int = 5) -> list[dict]:
 
 
 def _build_search_query(item: dict) -> str:
-    """Build a search query from raw title + existing tags."""
-    parts = []
+    """Build a short search query from raw title."""
     raw = (item.get("raw") or "").strip()
-    if raw:
-        parts.append(raw)
-    for key in ("existing_title", "existing_artist"):
-        v = (item.get(key) or "").strip()
-        if v and v.lower() not in ("unknown", "null", "none"):
-            parts.append(v)
-    # Deduplicate while preserving order
-    seen = set()
-    out = []
-    for p in parts:
-        low = p.lower()
-        if low not in seen:
-            seen.add(low)
-            out.append(p)
-    return " ".join(out)[:200]
+    # Strip common noise to improve search quality
+    raw = re.sub(r"[\(\[].*?(lyrics|official|mv|hd|4k).*?[\)\]]", "", raw, flags=re.I)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return raw[:120]
 
 
 def _call_llm(batch: list[dict]) -> list[dict] | None:
@@ -149,16 +118,18 @@ def _call_llm(batch: list[dict]) -> list[dict] | None:
         if b.get("existing_album"):
             item["existing_album"] = b["existing_album"]
 
-        # Web search context from local SearXNG
+        # Web search context from local SearXNG (short snippets only)
         query = _build_search_query(item)
         if query:
-            hits = _searxng_search(query, SEARXNG_MAX_RESULTS)
+            hits = _searxng_search(query, min(SEARXNG_MAX_RESULTS, 3))
             if hits:
                 item["web_search"] = hits
                 print(f"  SearXNG: {len(hits)} hits for {query!r}")
 
         req_items.append(item)
 
+    # No response_format: many vLLM builds return 400 for json_schema.
+    # The prompt already asks for a pure JSON array.
     payload = {
         "model": LLM_MODEL,
         "messages": [
@@ -166,15 +137,6 @@ def _call_llm(batch: list[dict]) -> list[dict] | None:
             {"role": "user", "content": json.dumps(req_items, ensure_ascii=False)},
         ],
         "temperature": 0.1,
-        # Nullable schema: title/artist/album may be null
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "music_tags",
-                "schema": LLM_RESPONSE_SCHEMA,
-                "strict": False,
-            },
-        },
     }
     timeout = None if not LLM_TIMEOUT else LLM_TIMEOUT
     headers = {}
@@ -189,6 +151,9 @@ def _call_llm(batch: list[dict]) -> list[dict] | None:
                 headers=headers,
                 timeout=timeout,
             )
+            if r.status_code >= 400:
+                body = r.text[:500]
+                print(f"LLM HTTP {r.status_code}: {body}")
             r.raise_for_status()
             content = r.json()["choices"][0]["message"]["content"]
             parsed = _extract_json_array(content)
@@ -298,6 +263,7 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
     Title and artist are nullable (may stay empty / be cleared).
     Album: keep MusicBrainz value if present, otherwise LLM value, otherwise fall back to title.
     SearXNG web results are included in the prompt when available.
+    If the LLM call fails, items are marked llm_failed and should not be written.
     """
     if not batch:
         return batch
@@ -307,6 +273,7 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
         for meta in batch:
             meta["needs_llm"] = False
             meta["llm_notes"] = "llm_failed"
+            meta["llm_authoritative"] = False
         return batch
 
     # Index LLM output by 'id' and fallback 'raw'
@@ -353,6 +320,7 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
         else:
             meta["needs_llm"] = False
             meta["llm_notes"] = "llm_row_missing"
+            meta["llm_authoritative"] = False
 
     return batch
 
