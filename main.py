@@ -14,6 +14,7 @@ Usage:
   python main.py --clean-junk [DIR]           # Phase 1: strip YouTube junk
   python main.py --from-filename [DIR]        # Phase 2: set tags from "Artist - Title" filenames
   python main.py --needs-tag [DIR]            # Phase 3: list files that still need work
+  python main.py --fix-art [DIR]              # embed good cover art (local or fetch)
 """
 import argparse
 import json
@@ -33,7 +34,7 @@ from parse_meta import parse_one, apply_llm_batch, finalize_allowlist, parse_all
 from musicbrainz import enrich
 from lyrics import fetch_lyrics
 from dedup import dedup, is_duplicate
-from artwork import process_cover
+from artwork import process_cover, fetch_cover_url, download_cover
 from local_db import init_db, stats
 from search_download import main as run_downloads, download_url
 
@@ -1010,6 +1011,138 @@ def needs_tag_folder(folder: Path):
     print(f"wrote {out_path}")
 
 
+
+def _apic_is_good(frame) -> bool:
+    """True if embedded cover is large enough to keep."""
+    try:
+        data = frame.data
+        if not data or len(data) < 8000:
+            return False
+        # Optional size check via PIL
+        from io import BytesIO
+        from PIL import Image
+        im = Image.open(BytesIO(data))
+        w, h = im.size
+        return w >= 200 and h >= 200
+    except Exception:
+        return False
+
+
+def _find_local_cover(mp3: Path) -> Path | None:
+    """Look for a cover image next to the file or in the parent folder."""
+    candidates = [
+        mp3.parent / "cover.jpg",
+        mp3.parent / "folder.jpg",
+        mp3.parent / "Folder.jpg",
+        mp3.with_suffix(".jpg"),
+        mp3.with_name(mp3.stem + ".jpg"),
+    ]
+    for c in candidates:
+        if c.exists() and c.stat().st_size > 2000:
+            return c
+    # Any jpg in the same folder (prefer largest)
+    jpgs = [p for p in mp3.parent.glob("*.jpg") if p.stat().st_size > 2000]
+    if jpgs:
+        return max(jpgs, key=lambda p: p.stat().st_size)
+    return None
+
+
+def fix_art_folder(folder: Path):
+    """Embed a good cover for every MP3.
+
+    Priority:
+    1. Keep existing APIC if large enough
+    2. Nearby cover.jpg / folder.jpg / *.jpg
+    3. Fetch from iTunes/Deezer when title+artist are known
+    """
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+    print(f"fix-art: scanning {folder} ...")
+    all_mp3s = [f for f in folder.rglob("*.mp3") if not f.name.startswith(".")]
+    all_mp3s.sort()
+    print(f"found {len(all_mp3s)} MP3s")
+
+    from mutagen.mp3 import MP3
+    from mutagen.id3 import APIC
+    import tempfile
+
+    kept = 0
+    embedded = 0
+    fetched = 0
+    skipped = 0
+
+    for i, f in enumerate(all_mp3s, 1):
+        try:
+            audio = MP3(f)
+            if audio.tags is None:
+                audio.add_tags()
+            tags = audio.tags
+
+            # 1. Keep good existing cover
+            good = False
+            for frame in tags.getall("APIC"):
+                if _apic_is_good(frame):
+                    good = True
+                    break
+            if good:
+                kept += 1
+                continue
+
+            # 2. Local image
+            src = _find_local_cover(f)
+            if src:
+                with tempfile.TemporaryDirectory() as td:
+                    dst = Path(td) / "cover.jpg"
+                    if process_cover(src, dst) and dst.exists():
+                        tags.delall("APIC")
+                        tags["APIC"] = APIC(
+                            encoding=3,
+                            mime="image/jpeg",
+                            type=3,
+                            desc="Cover",
+                            data=dst.read_bytes(),
+                        )
+                        audio.save()
+                        embedded += 1
+                        print(f"  embedded local: {f.name}")
+                        continue
+
+            # 3. Fetch when we have title+artist
+            tags_dict = _read_tags(f)
+            title = tags_dict["title"].strip()
+            artist = tags_dict["artist"].strip()
+            if title and artist and artist.lower() not in INVALID_ARTISTS:
+                url = fetch_cover_url(title, artist)
+                if url:
+                    with tempfile.TemporaryDirectory() as td:
+                        raw = Path(td) / "raw.jpg"
+                        dst = Path(td) / "cover.jpg"
+                        if download_cover(url, raw) and process_cover(raw, dst) and dst.exists():
+                            tags.delall("APIC")
+                            tags["APIC"] = APIC(
+                                encoding=3,
+                                mime="image/jpeg",
+                                type=3,
+                                desc="Cover",
+                                data=dst.read_bytes(),
+                            )
+                            audio.save()
+                            fetched += 1
+                            print(f"  fetched: {artist} - {title}")
+                            continue
+
+            skipped += 1
+        except Exception as e:
+            print(f"  art failed for {f.name}: {e}")
+            skipped += 1
+        if i % 500 == 0:
+            print(f"  processed {i}/{len(all_mp3s)} (kept={kept} local={embedded} fetched={fetched})")
+
+    print(f"done: kept={kept} embedded_local={embedded} fetched={fetched} skipped={skipped} / {len(all_mp3s)}")
+
+
 def dump_tags_folder(folder: Path):
     """Write filename and all ID3 tags for every MP3 under folder to a file."""
     folder = folder.resolve()
@@ -1091,6 +1224,8 @@ def main():
                     help=f"Phase 2: set artist/title from 'Artist - Title' filenames (default: {MUSIC_DIR})")
     ap.add_argument("--needs-tag", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help=f"Phase 3: list files that still need tagging (default: {MUSIC_DIR})")
+    ap.add_argument("--fix-art", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"embed good cover art (keep existing, local image, or fetch) (default: {MUSIC_DIR})")
     ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
@@ -1117,6 +1252,9 @@ def main():
         return
     if args.needs_tag:
         needs_tag_folder(Path(args.needs_tag))
+        return
+    if args.fix_art:
+        fix_art_folder(Path(args.fix_art))
         return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))
