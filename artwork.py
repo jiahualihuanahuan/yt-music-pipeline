@@ -19,3 +19,56 @@ def process_cover(src: Path, dst: Path):
     except Exception as e:
         print(f"artwork error {src}: {e}")
         return False
+
+
+def fetch_cover_url(title: str, artist: str) -> str | None:
+    """Return a high-res cover URL from iTunes (preferred) or Deezer."""
+    if not title or not artist:
+        return None
+    import requests
+    q = f"{artist} {title}"
+    # iTunes
+    try:
+        r = requests.get(
+            "https://itunes.apple.com/search",
+            params={"term": q, "entity": "song", "limit": 1},
+            timeout=10,
+        )
+        if r.ok:
+            results = r.json().get("results") or []
+            if results:
+                url = results[0].get("artworkUrl100") or ""
+                if url:
+                    return url.replace("100x100", "600x600")
+    except Exception:
+        pass
+    # Deezer fallback
+    try:
+        r = requests.get(
+            "https://api.deezer.com/search",
+            params={"q": q, "limit": 1},
+            timeout=10,
+        )
+        if r.ok:
+            data = r.json().get("data") or []
+            if data:
+                alb = data[0].get("album") or {}
+                return alb.get("cover_xl") or alb.get("cover_big") or alb.get("cover_medium")
+    except Exception:
+        pass
+    return None
+
+
+def download_cover(url: str, dst: Path) -> bool:
+    """Download cover image to dst."""
+    if not url:
+        return False
+    import requests
+    try:
+        r = requests.get(url, timeout=15)
+        if r.ok and r.content and len(r.content) > 1000:
+            dst.write_bytes(r.content)
+            return True
+    except Exception:
+        pass
+    return False
