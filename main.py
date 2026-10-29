@@ -797,7 +797,7 @@ def add_lyrics_folder(folder: Path):
 
 
 def dump_tags_folder(folder: Path):
-    """Print filename and all ID3 tags for every MP3 under folder. One block per file."""
+    """Write filename and all ID3 tags for every MP3 under folder to a file."""
     folder = folder.resolve()
     if not folder.is_dir():
         print(f"not a directory: {folder}")
@@ -812,7 +812,7 @@ def dump_tags_folder(folder: Path):
         if i % 1000 == 0:
             print(f"  scanned {i} files...")
     all_mp3s.sort()
-    print(f"found {len(all_mp3s)} MP3s\n")
+    print(f"found {len(all_mp3s)} MP3s")
 
     try:
         from mutagen.mp3 import MP3
@@ -820,34 +820,39 @@ def dump_tags_folder(folder: Path):
         print("mutagen not installed")
         return
 
-    for f in all_mp3s:
-        try:
-            audio = MP3(f)
-            tags = audio.tags
-            print(f"FILE: {f}")
-            if not tags:
-                print("  (no tags)")
-                print()
-                continue
-            # Print every frame in a stable order
-            for key in sorted(tags.keys()):
-                frame = tags[key]
-                # Prefer .text for text frames; fall back to str
-                if hasattr(frame, "text") and frame.text:
-                    val = "; ".join(str(x) for x in frame.text)
-                else:
-                    val = str(frame)
-                # Truncate very long values (lyrics, etc.)
-                if len(val) > 200:
-                    val = val[:200] + "..."
-                print(f"  {key}: {val}")
-            print()
-        except Exception as e:
-            print(f"FILE: {f}")
-            print(f"  ERROR: {e}")
-            print()
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = LOG_DIR / f"dump_tags_{stamp}.txt"
+    print(f"writing {out_path} ...")
 
-    print(f"done: dumped {len(all_mp3s)} files")
+    with out_path.open("w", encoding="utf-8") as fh:
+        fh.write(f"# dump-tags from {folder}\n")
+        fh.write(f"# {len(all_mp3s)} files\n\n")
+        for i, f in enumerate(all_mp3s, 1):
+            try:
+                audio = MP3(f)
+                tags = audio.tags
+                fh.write(f"FILE: {f}\n")
+                if not tags:
+                    fh.write("  (no tags)\n\n")
+                    continue
+                for key in sorted(tags.keys()):
+                    frame = tags[key]
+                    if hasattr(frame, "text") and frame.text:
+                        val = "; ".join(str(x) for x in frame.text)
+                    else:
+                        val = str(frame)
+                    if len(val) > 200:
+                        val = val[:200] + "..."
+                    fh.write(f"  {key}: {val}\n")
+                fh.write("\n")
+            except Exception as e:
+                fh.write(f"FILE: {f}\n")
+                fh.write(f"  ERROR: {e}\n\n")
+            if i % 500 == 0:
+                print(f"  wrote {i}/{len(all_mp3s)} ...")
+
+    print(f"done: wrote {len(all_mp3s)} files to {out_path}")
 
 
 def main():
