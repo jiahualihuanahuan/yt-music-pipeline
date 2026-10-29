@@ -9,7 +9,8 @@ Usage:
   python main.py --fill-missing /path/to/music # only retag files missing title/artist/album
   python main.py --llm-only /path/to/music    # force LLM inference only (overwrite tags, no regex)
   python main.py --remove-tags /path/to/music # strip text ID3 tags (keep cover art)
-  python main.py --lyrics /path/to/music       # add lyrics (USLT) for files with title+artist
+  python main.py --lyrics [DIR]               # add lyrics (USLT); default = MUSIC_DIR
+  python main.py --dump-tags [DIR]            # print filename + all ID3 tags (default = MUSIC_DIR)
 """
 import argparse
 import json
@@ -22,7 +23,7 @@ from datetime import datetime
 import glob
 from config import (
     STAGING_DIR, PROCESSED_DIR, LOG_DIR, DRY_RUN,
-    LLM_BATCH_SIZE,
+    LLM_BATCH_SIZE, MUSIC_DIR,
 )
 from search_download import main as run_downloads
 from parse_meta import parse_one, apply_llm_batch, finalize_allowlist, parse_all
@@ -794,20 +795,77 @@ def add_lyrics_folder(folder: Path):
     print(f"done: added lyrics to {added} / {len(all_mp3s)} files ({skipped} skipped)")
 
 
+
+def dump_tags_folder(folder: Path):
+    """Print filename and all ID3 tags for every MP3 under folder. One block per file."""
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+
+    print(f"dump-tags: scanning {folder} ...")
+    all_mp3s = []
+    for i, f in enumerate(folder.rglob("*.mp3"), 1):
+        if f.name.startswith("."):
+            continue
+        all_mp3s.append(f)
+        if i % 1000 == 0:
+            print(f"  scanned {i} files...")
+    all_mp3s.sort()
+    print(f"found {len(all_mp3s)} MP3s\n")
+
+    try:
+        from mutagen.mp3 import MP3
+    except ImportError:
+        print("mutagen not installed")
+        return
+
+    for f in all_mp3s:
+        try:
+            audio = MP3(f)
+            tags = audio.tags
+            print(f"FILE: {f}")
+            if not tags:
+                print("  (no tags)")
+                print()
+                continue
+            # Print every frame in a stable order
+            for key in sorted(tags.keys()):
+                frame = tags[key]
+                # Prefer .text for text frames; fall back to str
+                if hasattr(frame, "text") and frame.text:
+                    val = "; ".join(str(x) for x in frame.text)
+                else:
+                    val = str(frame)
+                # Truncate very long values (lyrics, etc.)
+                if len(val) > 200:
+                    val = val[:200] + "..."
+                print(f"  {key}: {val}")
+            print()
+        except Exception as e:
+            print(f"FILE: {f}")
+            print(f"  ERROR: {e}")
+            print()
+
+    print(f"done: dumped {len(all_mp3s)} files")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--skip-dl", action="store_true")
-    ap.add_argument("--reprocess", type=str, metavar="DIR",
-                    help="reparse + retag all MP3s under DIR in place")
-    ap.add_argument("--fill-missing", type=str, metavar="DIR",
-                    help="only retag MP3s missing title, artist, or album")
-    ap.add_argument("--llm-only", type=str, metavar="DIR",
-                    help="force LLM inference only (overwrite tags, skip regex parsing)")
-    ap.add_argument("--remove-tags", type=str, metavar="DIR",
-                    help="strip text ID3 tags (keep cover art) under DIR")
-    ap.add_argument("--lyrics", type=str, metavar="DIR",
-                    help="add lyrics (USLT) for MP3s with title+artist under DIR")
+    ap.add_argument("--reprocess", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"reparse + retag all MP3s under DIR (default: {MUSIC_DIR})")
+    ap.add_argument("--fill-missing", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"only retag MP3s missing title, artist, or album (default: {MUSIC_DIR})")
+    ap.add_argument("--llm-only", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"force LLM inference only (default: {MUSIC_DIR})")
+    ap.add_argument("--remove-tags", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"strip text ID3 tags (keep cover art) (default: {MUSIC_DIR})")
+    ap.add_argument("--lyrics", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"add lyrics (USLT) for MP3s with title+artist (default: {MUSIC_DIR})")
+    ap.add_argument("--dump-tags", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"print filename + all ID3 tags (default: {MUSIC_DIR})")
     ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
@@ -823,6 +881,9 @@ def main():
     except Exception as e:
         print(f"WARNING: could not init local DB: {e}")
 
+    if args.dump_tags:
+        dump_tags_folder(Path(args.dump_tags))
+        return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))
         return
