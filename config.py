@@ -43,6 +43,10 @@ LOG_DIR = BASE_DIR / "logs"
 LOCAL_DB_PATH = BASE_DIR / "musicbrainz_cache.db"
 COOKIES_PATH = BASE_DIR / "cookies.txt"     # optional: exported YouTube cookies
 
+# Default music library for --reprocess / --fill-missing / --dump-tags / etc.
+# Override with MUSIC_DIR in config_local.py if needed.
+MUSIC_DIR = Path("/mnt/data/docker/navidrome/music")
+
 # ---------- Download ----------
 AUDIO_FORMAT = "mp3"
 AUDIO_QUALITY = "320"          # VBR ~320k
