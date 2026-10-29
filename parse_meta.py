@@ -243,6 +243,68 @@ def parse_one(path: Path) -> dict:
     return meta
 
 
+
+import re as _re
+
+# Known hyphenated / parenthesized artist names to preserve
+_KNOWN_HYPHEN = {
+    "a-lin", "g-dragon", "j-hope", "j-min", "(g)i-dle", "g)i-dle",
+    "t-ara", "u-know", "nct 127", "nct dream",
+}
+
+_SPECIAL_RE = _re.compile(r"[^\w\s\-()\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", _re.UNICODE)
+_MULTI_SPACE = _re.compile(r"\s+")
+
+
+def _clean_text(val: str | None, kind: str = "title") -> str | None:
+    """Strip special characters. Keep letters, numbers, CJK, spaces, and hyphens
+    for known artist names like A-Lin / G-Dragon / (G)I-DLE.
+    """
+    if not val:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    # Remove most specials but keep hyphen and parentheses
+    s = _SPECIAL_RE.sub("", s)
+    s = _MULTI_SPACE.sub(" ", s).strip(" -")
+    if not s:
+        return None
+    low = s.lower()
+    # For artist: if it contains a hyphen and isn't a known hyphenated name,
+    # and looks like noise, drop the hyphenated junk. Otherwise keep.
+    if kind == "artist" and "-" in s and low not in _KNOWN_HYPHEN:
+        # Keep if both sides are short word-like (A-Lin style)
+        parts = s.split("-")
+        if not all(p.strip() and len(p.strip()) <= 12 for p in parts):
+            s = s.replace("-", " ")
+            s = _MULTI_SPACE.sub(" ", s).strip()
+    return s or None
+
+
+def _artist_is_known(name: str) -> bool:
+    """True if artist is in the local DB or MusicBrainz."""
+    if not name:
+        return False
+    try:
+        from local_db import connect, lookup_artist
+        db = connect()
+        try:
+            if lookup_artist(db, name):
+                return True
+        finally:
+            db.close()
+    except Exception:
+        pass
+    try:
+        from musicbrainz import mb_artist
+        if mb_artist(name):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _clean_llm_field(val) -> str | None:
     """Return stripped string, or None if LLM wants it cleared/empty (nullable)."""
     if val is None:
@@ -280,9 +342,14 @@ def _apply_row(meta: dict, llm_row: dict):
     Album: use LLM value only if it looks like a real album name.
     Otherwise always fall back to title (best guess when unsure).
     """
-    title = _clean_llm_field(llm_row.get("title"))
-    artist = _clean_llm_field(llm_row.get("artist"))
-    album = _clean_llm_field(llm_row.get("album"))
+    title = _clean_text(_clean_llm_field(llm_row.get("title")), "title")
+    artist = _clean_text(_clean_llm_field(llm_row.get("artist")), "artist")
+    album = _clean_text(_clean_llm_field(llm_row.get("album")), "album")
+
+    # Artist must be in local DB or MusicBrainz; otherwise clear it
+    if artist and not _artist_is_known(artist):
+        print(f"  artist not in DB/MusicBrainz, cleared: {artist!r}")
+        artist = None
 
     meta["title"] = title or ""
     meta["artist"] = artist or ""
