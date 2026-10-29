@@ -47,6 +47,10 @@ COOKIES_PATH = BASE_DIR / "cookies.txt"     # optional: exported YouTube cookies
 # Override with MUSIC_DIR in config_local.py if needed.
 MUSIC_DIR = Path("/mnt/data/docker/navidrome/music")
 
+# Well-tagged library. Scans of MUSIC_DIR ignore this folder.
+# Override with ORGANIZED_DIR in config_local.py if needed.
+ORGANIZED_DIR = Path("/mnt/data/docker/navidrome/organized")
+
 # ---------- Download ----------
 AUDIO_FORMAT = "mp3"
 AUDIO_QUALITY = "320"          # VBR ~320k
