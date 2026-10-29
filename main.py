@@ -514,9 +514,13 @@ def _retag_one(meta: dict):
     if authoritative:
         # Title and artist may stay empty (LLM not confident).
         # Album: use only a clean real album; otherwise always copy title.
-        title = (meta.get("title") or "").strip()
-        artist = _clean_artist(meta.get("artist") or "")
-        album = (meta.get("album") or "").strip()
+        from parse_meta import _clean_text, _artist_is_known
+        title = _clean_text(meta.get("title"), "title") or ""
+        artist = _clean_text(_clean_artist(meta.get("artist") or ""), "artist") or ""
+        if artist and not _artist_is_known(artist):
+            print(f"  artist not in DB/MusicBrainz, cleared: {artist!r}")
+            artist = ""
+        album = _clean_text(meta.get("album"), "album") or ""
         # Prefer title whenever album is missing, noisy, or equals the raw filename
         raw = (meta.get("raw") or "").strip()
         if _is_invalid_album(album) or (raw and album == raw) or (title and album == title):
@@ -524,11 +528,15 @@ def _retag_one(meta: dict):
         album_artist = artist
         allow_clear = True
     else:
+        from parse_meta import _clean_text, _artist_is_known
         # 1. Clean Title (fallback to filename stem)
-        title = (meta.get("title") or path.stem).strip()
+        title = _clean_text(meta.get("title") or path.stem, "title") or ""
 
         # 2. Clean Artist (fallback to parent folder if missing or 'Unknown')
-        raw_artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "")
+        raw_artist = _clean_text(_clean_artist(meta.get("artist_canonical") or meta.get("artist") or ""), "artist") or ""
+        if raw_artist and not _artist_is_known(raw_artist):
+            print(f"  artist not in DB/MusicBrainz, cleared: {raw_artist!r}")
+            raw_artist = ""
         if raw_artist.lower() in INVALID_ARTISTS:
             artist = _clean_artist(meta.get("folder_artist") or "Unknown")
         else:
