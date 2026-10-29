@@ -16,6 +16,7 @@ Usage:
   python main.py --needs-tag [DIR]            # Phase 3: list files that still need work
   python main.py --fix-art [DIR]              # embed good cover art (local or fetch)
   python main.py --organize [DIR]             # move well-tagged files to organized/Artist/Album/
+  python main.py --fix-wrong [DIR]            # retag files whose tags disagree with the filename
 """
 import argparse
 import json
@@ -1295,6 +1296,97 @@ def organize_library(folder: Path):
     print(f"done: moved={moved} dupes_removed={dupes} skipped={skipped} empty_dirs_removed={empty_src + empty_org}")
 
 
+
+def _tags_look_wrong(path: Path, tags: dict) -> list[str]:
+    """Return reasons if existing tags disagree with the filename or look noisy."""
+    reasons = []
+    title = (tags.get("title") or "").strip()
+    artist = (tags.get("artist") or "").strip()
+    album = (tags.get("album") or "").strip()
+
+    parsed = _parse_filename_artist_title(path.stem)
+    if parsed:
+        fn_artist, fn_title = parsed
+        # Rough mismatch: neither contains the other
+        if title and fn_title.lower() not in title.lower() and title.lower() not in fn_title.lower():
+            reasons.append("title_mismatch")
+        if artist and fn_artist.lower() not in artist.lower() and artist.lower() not in fn_artist.lower():
+            reasons.append("artist_mismatch")
+
+    # Album looks like a filename / video title
+    if album and _is_invalid_album(album):
+        reasons.append("bad_album")
+
+    # Artist looks like a channel / uploader
+    if artist and artist.lower() in INVALID_ARTISTS:
+        reasons.append("bad_artist")
+
+    return reasons
+
+
+def fix_wrong_folder(folder: Path):
+    """Find files whose tags disagree with the filename (or are noisy) and retag them with LLM."""
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+
+    print(f"fix-wrong: scanning {folder} (skipping organized/) ...")
+    all_mp3s = _list_mp3s(folder)
+    print(f"found {len(all_mp3s)} MP3s")
+
+    wrong = []
+    for i, f in enumerate(all_mp3s, 1):
+        tags = _read_tags(f)
+        reasons = _tags_look_wrong(f, tags)
+        if reasons:
+            wrong.append((f, reasons, tags))
+        if i % 2000 == 0:
+            print(f"  checked {i}/{len(all_mp3s)} ... ({len(wrong)} look wrong)")
+
+    print(f"fix-wrong: {len(wrong)} / {len(all_mp3s)} files look wrong")
+    if not wrong:
+        return
+
+    # Queue them for LLM-only overwrite
+    llm_buf = []
+    results = []
+
+    def flush():
+        nonlocal llm_buf
+        if not llm_buf:
+            return
+        apply_llm_batch(llm_buf)
+        for m in llm_buf:
+            _retag_one(m)
+            results.append(m)
+        llm_buf = []
+
+    for f, reasons, tags in wrong:
+        meta = {
+            "raw": f.stem,
+            "file": f.name,
+            "path": str(f),
+            "needs_llm": True,
+            "title": tags.get("title") or "",
+            "artist": tags.get("artist") or "",
+            "existing_title": tags.get("title") or "",
+            "existing_artist": tags.get("artist") or "",
+            "existing_album": tags.get("album") or "",
+        }
+        fb = _folder_fallback(f)
+        meta["folder_artist"] = fb["folder_artist"]
+        meta["folder_album"] = fb["folder_album"]
+        print(f"  wrong ({', '.join(reasons)}): {f.name}")
+        llm_buf.append(meta)
+        if len(llm_buf) >= LLM_BATCH_SIZE:
+            flush()
+
+    flush()
+    finalize_allowlist(results)
+    print(f"done: retagged {len(results)} wrong files")
+
+
 def dump_tags_folder(folder: Path):
     """Write filename and all ID3 tags for every MP3 under folder to a file."""
     folder = folder.resolve()
@@ -1380,6 +1472,8 @@ def main():
                     help=f"embed good cover art (keep existing, local image, or fetch) (default: {MUSIC_DIR})")
     ap.add_argument("--organize", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help=f"move well-tagged files to {ORGANIZED_DIR}/Artist/Album/ (dedupe, clean empty dirs)")
+    ap.add_argument("--fix-wrong", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help="retag files whose tags disagree with the filename or look noisy")
     ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
@@ -1412,6 +1506,9 @@ def main():
         return
     if args.organize:
         organize_library(Path(args.organize))
+        return
+    if args.fix_wrong:
+        fix_wrong_folder(Path(args.fix_wrong))
         return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))
