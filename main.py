@@ -11,6 +11,9 @@ Usage:
   python main.py --remove-tags /path/to/music # strip text ID3 tags (keep cover art)
   python main.py --lyrics [DIR]               # add lyrics (USLT); default = MUSIC_DIR
   python main.py --dump-tags [DIR]            # print filename + all ID3 tags (default = MUSIC_DIR)
+  python main.py --clean-junk [DIR]           # Phase 1: strip YouTube junk
+  python main.py --from-filename [DIR]        # Phase 2: set tags from "Artist - Title" filenames
+  python main.py --needs-tag [DIR]            # Phase 3: list files that still need work
 """
 import argparse
 import json
@@ -50,7 +53,21 @@ INVALID_ALBUMS = {
 # Artists that should never be used
 INVALID_ARTISTS = {
     "", "unknown", "unknown artist", "various artists", "va", "群星", "未知歌手", "none", "null",
+    "未知", "未知音素",
 }
+
+# YouTube / useless genres to clear
+JUNK_GENRES = {
+    "music", "entertainment", "people & blogs", "people and blogs",
+    "gaming", "news", "education", "comedy", "howto & style", "film & animation",
+}
+
+# TXXX keys that are YouTube/yt-dlp junk (keep FEATURED, MusicBrainz*, etc.)
+JUNK_TXXX_PREFIXES = (
+    "comment", "description", "synopsis", "purl",
+    "compatible_brands", "major_brand", "minor_version",
+    "encoder", "handler_name",
+)
 
 # Regex: album is only punctuation, symbols, or emoji
 _JUNK_ALBUM_RE = re.compile(r"^[\s\W\u2600-\u27BF\U0001F300-\U0001F9FF]+$", re.UNICODE)
@@ -112,6 +129,42 @@ def _clean_artist(name: str) -> str:
             n = n[: -(len(noise) + 1)].strip(" -_")
             break
     return n or name
+
+
+
+def _has_musicbrainz(path: Path) -> bool:
+    """True if the file has a MusicBrainz Artist Id (usually means it was already enriched)."""
+    try:
+        from mutagen.mp3 import MP3
+        audio = MP3(path)
+        if not audio.tags:
+            return False
+        for key in audio.tags.keys():
+            if key.startswith("TXXX:MusicBrainz") or key.startswith("UFID:http://musicbrainz.org"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _parse_filename_artist_title(stem: str) -> tuple[str, str] | None:
+    """Return (artist, title) if the stem looks like 'Artist - Title'.
+
+    Requires a clear separator and both sides non-empty and not too short.
+    """
+    # Prefer the last " - " to handle "A - B - Title"
+    if " - " not in stem:
+        return None
+    left, right = stem.rsplit(" - ", 1)
+    left, right = left.strip(), right.strip()
+    if not left or not right or len(left) < 1 or len(right) < 1:
+        return None
+    # Reject if either side is pure noise
+    if left.lower() in INVALID_ARTISTS or right.lower() in INVALID_ALBUMS:
+        return None
+    if _ALBUM_NOISE_RE.search(left) or _ALBUM_NOISE_RE.search(right):
+        return None
+    return left, right
 
 
 def _cleanup_staging_sidecars(mp3_src: Path):
@@ -557,6 +610,11 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
     if only_missing:
         mp3s = []
         for i, f in enumerate(all_mp3s, 1):
+            # Skip files that already have MusicBrainz + valid artist/title
+            if _has_musicbrainz(f):
+                tags = _read_tags(f)
+                if tags["artist"].strip() and tags["title"].strip() and tags["artist"].strip().lower() not in INVALID_ARTISTS:
+                    continue
             tags = _read_tags(f)
             has_valid_artist = tags["artist"].strip().lower() not in INVALID_ARTISTS
             has_valid_album = not _is_invalid_album(tags["album"])
@@ -604,6 +662,7 @@ def reprocess_folder(folder: Path, only_missing: bool = False):
             results.append(meta)
 
     flush()
+    print(f"LLM-only: skipped {skipped_mb} files that already have MusicBrainz + valid tags")
     finalize_allowlist(results)
     print(f"done: cleaned and retagged {len(results)} files")
 
@@ -642,7 +701,14 @@ def llm_only_folder(folder: Path):
             results.append(m)
         llm_buf = []
 
+    skipped_mb = 0
     for f in all_mp3s:
+        # Skip files that already have MusicBrainz + valid artist/title
+        if _has_musicbrainz(f):
+            tags = _read_tags(f)
+            if tags["artist"].strip() and tags["title"].strip() and tags["artist"].strip().lower() not in INVALID_ARTISTS:
+                skipped_mb += 1
+                continue
         # Minimal meta: only filename as raw input. Skip regex entirely.
         # Also pass existing tags so the LLM can judge / clear them.
         existing = _read_tags(f)
@@ -796,6 +862,154 @@ def add_lyrics_folder(folder: Path):
 
 
 
+
+def clean_junk_folder(folder: Path):
+    """Phase 1: strip YouTube junk TXXX and useless genres. Keep cover, title, artist, album, lyrics, MusicBrainz."""
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+    print(f"clean-junk: scanning {folder} ...")
+    all_mp3s = [f for f in folder.rglob("*.mp3") if not f.name.startswith(".")]
+    all_mp3s.sort()
+    print(f"found {len(all_mp3s)} MP3s")
+
+    from mutagen.mp3 import MP3
+    cleaned = 0
+    for i, f in enumerate(all_mp3s, 1):
+        try:
+            audio = MP3(f)
+            if audio.tags is None:
+                continue
+            tags = audio.tags
+            changed = False
+
+            # Clear junk TXXX
+            for key in list(tags.keys()):
+                if key.startswith("TXXX:"):
+                    desc = key.split(":", 1)[1].lower()
+                    if any(desc.startswith(p) or p in desc for p in JUNK_TXXX_PREFIXES):
+                        tags.delall(key)
+                        changed = True
+
+            # Clear junk genre
+            genre = ""
+            if "TCON" in tags and tags["TCON"].text:
+                genre = str(tags["TCON"].text[0]).strip().lower()
+            if genre in JUNK_GENRES:
+                tags.delall("TCON")
+                changed = True
+
+            if changed:
+                audio.save()
+                cleaned += 1
+        except Exception as e:
+            print(f"  clean failed for {f.name}: {e}")
+        if i % 1000 == 0:
+            print(f"  processed {i}/{len(all_mp3s)} ...")
+
+    print(f"done: cleaned junk on {cleaned} / {len(all_mp3s)} files")
+
+
+
+def from_filename_folder(folder: Path):
+    """Phase 2: set artist/title from 'Artist - Title.mp3' filenames. Album falls back to title."""
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+    print(f"from-filename: scanning {folder} ...")
+    all_mp3s = [f for f in folder.rglob("*.mp3") if not f.name.startswith(".")]
+    all_mp3s.sort()
+    print(f"found {len(all_mp3s)} MP3s")
+
+    from mutagen.mp3 import MP3
+    from mutagen.id3 import TIT2, TPE1, TALB, TPE2
+    applied = 0
+    skipped = 0
+    for i, f in enumerate(all_mp3s, 1):
+        parsed = _parse_filename_artist_title(f.stem)
+        if not parsed:
+            skipped += 1
+            continue
+        artist, title = parsed
+        # Skip if already has MusicBrainz and valid tags
+        if _has_musicbrainz(f):
+            tags = _read_tags(f)
+            if tags["artist"].strip() and tags["title"].strip():
+                skipped += 1
+                continue
+        try:
+            audio = MP3(f)
+            if audio.tags is None:
+                audio.add_tags()
+            tags = audio.tags
+            tags["TIT2"] = TIT2(encoding=3, text=title)
+            tags["TPE1"] = TPE1(encoding=3, text=artist)
+            tags["TPE2"] = TPE2(encoding=3, text=artist)
+            # Album = title unless a clean album already exists
+            current_album = ""
+            if "TALB" in tags and tags["TALB"].text:
+                current_album = str(tags["TALB"].text[0]).strip()
+            if _is_invalid_album(current_album):
+                tags["TALB"] = TALB(encoding=3, text=title)
+            audio.save()
+            applied += 1
+            print(f"  {artist} - {title}")
+        except Exception as e:
+            print(f"  write failed for {f.name}: {e}")
+            skipped += 1
+        if i % 1000 == 0:
+            print(f"  processed {i}/{len(all_mp3s)} ...")
+
+    print(f"done: applied filename tags to {applied} / {len(all_mp3s)} files ({skipped} skipped)")
+
+
+
+def needs_tag_folder(folder: Path):
+    """Phase 3: list files that still need tagging (no valid artist/title, or album is filename-like)."""
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+    print(f"needs-tag: scanning {folder} ...")
+    all_mp3s = [f for f in folder.rglob("*.mp3") if not f.name.startswith(".")]
+    all_mp3s.sort()
+    print(f"found {len(all_mp3s)} MP3s")
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = LOG_DIR / f"needs_tag_{stamp}.txt"
+    need = []
+    for i, f in enumerate(all_mp3s, 1):
+        tags = _read_tags(f)
+        artist = tags["artist"].strip()
+        title = tags["title"].strip()
+        album = tags["album"].strip()
+        reasons = []
+        if not title or title.lower() in INVALID_ALBUMS:
+            reasons.append("no_title")
+        if not artist or artist.lower() in INVALID_ARTISTS:
+            reasons.append("no_artist")
+        if _is_invalid_album(album):
+            reasons.append("bad_album")
+        if reasons:
+            need.append((f, reasons, artist, title, album))
+        if i % 2000 == 0:
+            print(f"  checked {i}/{len(all_mp3s)} ... ({len(need)} need work)")
+
+    with out_path.open("w", encoding="utf-8") as fh:
+        fh.write(f"# needs-tag from {folder}\n")
+        fh.write(f"# {len(need)} / {len(all_mp3s)} files need work\n\n")
+        for f, reasons, artist, title, album in need:
+            fh.write(f"{f}\n")
+            fh.write(f"  reasons: {', '.join(reasons)}\n")
+            fh.write(f"  artist={artist or '(empty)'}  title={title or '(empty)'}  album={album or '(empty)'}\n\n")
+
+    print(f"done: {len(need)} / {len(all_mp3s)} files need tagging")
+    print(f"wrote {out_path}")
+
+
 def dump_tags_folder(folder: Path):
     """Write filename and all ID3 tags for every MP3 under folder to a file."""
     folder = folder.resolve()
@@ -871,6 +1085,12 @@ def main():
                     help=f"add lyrics (USLT) for MP3s with title+artist (default: {MUSIC_DIR})")
     ap.add_argument("--dump-tags", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help=f"print filename + all ID3 tags (default: {MUSIC_DIR})")
+    ap.add_argument("--clean-junk", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"Phase 1: strip YouTube junk TXXX and useless genres (default: {MUSIC_DIR})")
+    ap.add_argument("--from-filename", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"Phase 2: set artist/title from 'Artist - Title' filenames (default: {MUSIC_DIR})")
+    ap.add_argument("--needs-tag", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"Phase 3: list files that still need tagging (default: {MUSIC_DIR})")
     ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
@@ -888,6 +1108,15 @@ def main():
 
     if args.dump_tags:
         dump_tags_folder(Path(args.dump_tags))
+        return
+    if args.clean_junk:
+        clean_junk_folder(Path(args.clean_junk))
+        return
+    if args.from_filename:
+        from_filename_folder(Path(args.from_filename))
+        return
+    if args.needs_tag:
+        needs_tag_folder(Path(args.needs_tag))
         return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))
