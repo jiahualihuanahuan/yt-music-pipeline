@@ -17,6 +17,7 @@ Usage:
   python main.py --fix-art [DIR]              # embed good cover art (local or fetch)
   python main.py --organize [DIR]             # move well-tagged files to organized/Artist/Album/
   python main.py --fix-wrong [DIR]            # retag files whose tags disagree with the filename
+  python main.py --process [DIR]              # one-pass for mixed folders (recommended)
 """
 import argparse
 import json
@@ -1387,6 +1388,86 @@ def fix_wrong_folder(folder: Path):
     print(f"done: retagged {len(results)} wrong files")
 
 
+
+def process_folder(folder: Path):
+    """One-pass for a mixed library.
+
+    1. Strip YouTube junk tags
+    2. Apply safe filename artist/title where it matches
+    3. LLM-retag only files that are missing tags or look wrong
+    4. Leave well-tagged files alone
+    Skips the organized/ folder.
+    """
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+
+    print(f"process: {folder} (skipping organized/)")
+
+    print("\n--- step 1: clean junk ---")
+    clean_junk_folder(folder)
+
+    print("\n--- step 2: from filename ---")
+    from_filename_folder(folder)
+
+    print("\n--- step 3: collect missing + wrong ---")
+    all_mp3s = _list_mp3s(folder)
+    need = []
+    for f in all_mp3s:
+        tags = _read_tags(f)
+        reasons = []
+        if not _is_well_tagged(tags):
+            reasons.append("missing")
+        reasons.extend(_tags_look_wrong(f, tags))
+        if reasons:
+            need.append((f, reasons, tags))
+
+    print(f"process: {len(need)} / {len(all_mp3s)} files need LLM")
+    if not need:
+        print("nothing to do")
+        return
+
+    print("\n--- step 4: LLM on remaining ---")
+    llm_buf = []
+    results = []
+
+    def flush():
+        nonlocal llm_buf
+        if not llm_buf:
+            return
+        apply_llm_batch(llm_buf)
+        for m in llm_buf:
+            _retag_one(m)
+            results.append(m)
+        llm_buf = []
+
+    for f, reasons, tags in need:
+        meta = {
+            "raw": f.stem,
+            "file": f.name,
+            "path": str(f),
+            "needs_llm": True,
+            "title": tags.get("title") or "",
+            "artist": tags.get("artist") or "",
+            "existing_title": tags.get("title") or "",
+            "existing_artist": tags.get("artist") or "",
+            "existing_album": tags.get("album") or "",
+        }
+        fb = _folder_fallback(f)
+        meta["folder_artist"] = fb["folder_artist"]
+        meta["folder_album"] = fb["folder_album"]
+        print(f"  need ({', '.join(reasons)}): {f.name}")
+        llm_buf.append(meta)
+        if len(llm_buf) >= LLM_BATCH_SIZE:
+            flush()
+
+    flush()
+    finalize_allowlist(results)
+    print(f"\ndone: processed {len(results)} files")
+    print("next: python main.py --fix-art   then   python main.py --organize")
+
+
 def dump_tags_folder(folder: Path):
     """Write filename and all ID3 tags for every MP3 under folder to a file."""
     folder = folder.resolve()
@@ -1474,6 +1555,8 @@ def main():
                     help=f"move well-tagged files to {ORGANIZED_DIR}/Artist/Album/ (dedupe, clean empty dirs)")
     ap.add_argument("--fix-wrong", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help="retag files whose tags disagree with the filename or look noisy")
+    ap.add_argument("--process", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help="one-pass for mixed folders: clean junk, from-filename, LLM only missing+wrong")
     ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
@@ -1509,6 +1592,9 @@ def main():
         return
     if args.fix_wrong:
         fix_wrong_folder(Path(args.fix_wrong))
+        return
+    if args.process:
+        process_folder(Path(args.process))
         return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))
