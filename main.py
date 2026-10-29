@@ -15,6 +15,7 @@ Usage:
   python main.py --from-filename [DIR]        # Phase 2: set tags from "Artist - Title" filenames
   python main.py --needs-tag [DIR]            # Phase 3: list files that still need work
   python main.py --fix-art [DIR]              # embed good cover art (local or fetch)
+  python main.py --organize [DIR]             # move well-tagged files to organized/Artist/Album/
 """
 import argparse
 import json
@@ -27,7 +28,7 @@ from datetime import datetime
 import glob
 from config import (
     STAGING_DIR, PROCESSED_DIR, LOG_DIR, DRY_RUN,
-    LLM_BATCH_SIZE, MUSIC_DIR,
+    LLM_BATCH_SIZE, MUSIC_DIR, ORGANIZED_DIR,
 )
 from search_download import main as run_downloads
 from parse_meta import parse_one, apply_llm_batch, finalize_allowlist, parse_all
@@ -871,7 +872,7 @@ def clean_junk_folder(folder: Path):
         print(f"not a directory: {folder}")
         return
     print(f"clean-junk: scanning {folder} ...")
-    all_mp3s = [f for f in folder.rglob("*.mp3") if not f.name.startswith(".")]
+    all_mp3s = _list_mp3s(folder)
     all_mp3s.sort()
     print(f"found {len(all_mp3s)} MP3s")
 
@@ -920,7 +921,7 @@ def from_filename_folder(folder: Path):
         print(f"not a directory: {folder}")
         return
     print(f"from-filename: scanning {folder} ...")
-    all_mp3s = [f for f in folder.rglob("*.mp3") if not f.name.startswith(".")]
+    all_mp3s = _list_mp3s(folder)
     all_mp3s.sort()
     print(f"found {len(all_mp3s)} MP3s")
 
@@ -974,7 +975,7 @@ def needs_tag_folder(folder: Path):
         print(f"not a directory: {folder}")
         return
     print(f"needs-tag: scanning {folder} ...")
-    all_mp3s = [f for f in folder.rglob("*.mp3") if not f.name.startswith(".")]
+    all_mp3s = _list_mp3s(folder)
     all_mp3s.sort()
     print(f"found {len(all_mp3s)} MP3s")
 
@@ -1060,7 +1061,7 @@ def fix_art_folder(folder: Path):
         print(f"not a directory: {folder}")
         return
     print(f"fix-art: scanning {folder} ...")
-    all_mp3s = [f for f in folder.rglob("*.mp3") if not f.name.startswith(".")]
+    all_mp3s = _list_mp3s(folder)
     all_mp3s.sort()
     print(f"found {len(all_mp3s)} MP3s")
 
@@ -1141,6 +1142,157 @@ def fix_art_folder(folder: Path):
             print(f"  processed {i}/{len(all_mp3s)} (kept={kept} local={embedded} fetched={fetched})")
 
     print(f"done: kept={kept} embedded_local={embedded} fetched={fetched} skipped={skipped} / {len(all_mp3s)}")
+
+
+
+def _is_under_organized(path: Path) -> bool:
+    """True if path is inside ORGANIZED_DIR."""
+    try:
+        path.resolve().relative_to(ORGANIZED_DIR.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _list_mp3s(folder: Path) -> list[Path]:
+    """List MP3s under folder, skipping the organized library and hidden files."""
+    out = []
+    for f in folder.rglob("*.mp3"):
+        if f.name.startswith("."):
+            continue
+        if _is_under_organized(f):
+            continue
+        out.append(f)
+    out.sort()
+    return out
+
+
+def _is_well_tagged(tags: dict) -> bool:
+    """True if title, artist, and album are all valid."""
+    title = (tags.get("title") or "").strip()
+    artist = (tags.get("artist") or "").strip()
+    album = (tags.get("album") or "").strip()
+    if not title or title.lower() in INVALID_ALBUMS:
+        return False
+    if not artist or artist.lower() in INVALID_ARTISTS:
+        return False
+    if _is_invalid_album(album):
+        return False
+    return True
+
+
+def _safe_name(s: str) -> str:
+    return "".join(c for c in s if c not in '/\\:*?"<>|').strip() or "Unknown"
+
+
+def _file_hash(path: Path, block=1024 * 1024) -> str:
+    """MD5 of file content (for exact dedup)."""
+    import hashlib
+    h = hashlib.md5()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(block)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _remove_empty_dirs(root: Path) -> int:
+    """Remove empty directories under root (bottom-up)."""
+    removed = 0
+    for dirpath in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if not dirpath.is_dir() or dirpath == root:
+            continue
+        try:
+            if not any(dirpath.iterdir()):
+                dirpath.rmdir()
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def organize_library(folder: Path):
+    """Move well-tagged files into ORGANIZED_DIR/Artist/Album/filename.mp3.
+
+    - Deduplicates by content hash (keeps existing organized copy)
+    - Removes empty folders after the move
+    - Does not touch files already under ORGANIZED_DIR
+    """
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+
+    ORGANIZED_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"organize: scanning {folder} (organized = {ORGANIZED_DIR}) ...")
+    all_mp3s = _list_mp3s(folder)
+    print(f"found {len(all_mp3s)} MP3s outside organized/")
+
+    existing_hashes = {}
+    for f in ORGANIZED_DIR.rglob("*.mp3"):
+        try:
+            existing_hashes[_file_hash(f)] = f
+        except Exception:
+            pass
+    print(f"indexed {len(existing_hashes)} existing organized files")
+
+    moved = 0
+    dupes = 0
+    skipped = 0
+    seen_hashes = dict(existing_hashes)
+
+    for i, f in enumerate(all_mp3s, 1):
+        tags = _read_tags(f)
+        if not _is_well_tagged(tags):
+            skipped += 1
+            continue
+
+        title = tags["title"].strip()
+        artist = _clean_artist(tags["artist"]).strip()
+        album = tags["album"].strip()
+        if _is_invalid_album(album):
+            album = title
+
+        try:
+            h = _file_hash(f)
+        except Exception as e:
+            print(f"  hash failed for {f.name}: {e}")
+            skipped += 1
+            continue
+
+        if h in seen_hashes:
+            try:
+                f.unlink()
+                dupes += 1
+                print(f"  dupe removed: {f.name}")
+            except Exception as e:
+                print(f"  dupe remove failed for {f.name}: {e}")
+            continue
+
+        dest_dir = ORGANIZED_DIR / _safe_name(artist) / _safe_name(album)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f.name
+        if dest.exists():
+            dest = dest_dir / f"{f.stem}_{h[:6]}{f.suffix}"
+
+        try:
+            import shutil
+            shutil.move(str(f), str(dest))
+            seen_hashes[h] = dest
+            moved += 1
+            print(f"  moved: {artist} / {album} / {f.name}")
+        except Exception as e:
+            print(f"  move failed for {f.name}: {e}")
+            skipped += 1
+
+        if i % 500 == 0:
+            print(f"  processed {i}/{len(all_mp3s)} (moved={moved} dupes={dupes})")
+
+    empty_src = _remove_empty_dirs(folder)
+    empty_org = _remove_empty_dirs(ORGANIZED_DIR)
+    print(f"done: moved={moved} dupes_removed={dupes} skipped={skipped} empty_dirs_removed={empty_src + empty_org}")
 
 
 def dump_tags_folder(folder: Path):
@@ -1226,6 +1378,8 @@ def main():
                     help=f"Phase 3: list files that still need tagging (default: {MUSIC_DIR})")
     ap.add_argument("--fix-art", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help=f"embed good cover art (keep existing, local image, or fetch) (default: {MUSIC_DIR})")
+    ap.add_argument("--organize", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help=f"move well-tagged files to {ORGANIZED_DIR}/Artist/Album/ (dedupe, clean empty dirs)")
     ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
@@ -1255,6 +1409,9 @@ def main():
         return
     if args.fix_art:
         fix_art_folder(Path(args.fix_art))
+        return
+    if args.organize:
+        organize_library(Path(args.organize))
         return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))
