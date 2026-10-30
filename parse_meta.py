@@ -346,11 +346,6 @@ def _apply_row(meta: dict, llm_row: dict):
     artist = _clean_text(_clean_llm_field(llm_row.get("artist")), "artist")
     album = _clean_text(_clean_llm_field(llm_row.get("album")), "album")
 
-    # Artist must be in local DB or MusicBrainz; otherwise clear it
-    if artist and not _artist_is_known(artist):
-        print(f"  artist not in DB/MusicBrainz, cleared: {artist!r}")
-        artist = None
-
     meta["title"] = title or ""
     meta["artist"] = artist or ""
 
