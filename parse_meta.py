@@ -95,11 +95,13 @@ def _searxng_search(query: str, max_results: int = 3) -> list[dict]:
 
 
 def _build_search_query(item: dict) -> str:
-    """Build a short search query from raw title."""
+    """Ask what the artist, title, and album are for this track."""
     raw = (item.get("raw") or "").strip()
     raw = re.sub(r"[\(\[].*?(lyrics|official|mv|hd|4k).*?[\)\]]", "", raw, flags=re.I)
     raw = re.sub(r"\s+", " ", raw).strip()
-    return raw[:120]
+    if not raw:
+        return ""
+    return f"what is the artist, title and album of {raw[:100]}"
 
 
 def _call_llm(batch: list[dict], use_search: bool = False) -> list[dict] | None:
