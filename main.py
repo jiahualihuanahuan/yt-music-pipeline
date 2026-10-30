@@ -1240,18 +1240,23 @@ def organize_library(folder: Path):
     all_mp3s = _list_mp3s(folder)
     print(f"found {len(all_mp3s)} MP3s outside organized/")
 
-    existing_hashes = {}
+    # Index existing organized files by size (fast). Full hash only on size collision.
+    print("indexing existing organized files by size ...")
+    size_index = {}  # size -> list of paths
+    n_org = 0
     for f in ORGANIZED_DIR.rglob("*.mp3"):
         try:
-            existing_hashes[_file_hash(f)] = f
-        except Exception:
+            size_index.setdefault(f.stat().st_size, []).append(f)
+            n_org += 1
+            if n_org % 2000 == 0:
+                print(f"  indexed {n_org} ...")
+        except OSError:
             pass
-    print(f"indexed {len(existing_hashes)} existing organized files")
+    print(f"indexed {n_org} existing organized files")
 
     moved = 0
     dupes = 0
     skipped = 0
-    seen_hashes = dict(existing_hashes)
 
     for i, f in enumerate(all_mp3s, 1):
         tags = _read_tags(f)
@@ -1265,14 +1270,21 @@ def organize_library(folder: Path):
         if _is_invalid_album(album):
             album = title
 
+        # Fast dedup: same size as something already organized -> confirm with hash
         try:
-            h = _file_hash(f)
-        except Exception as e:
-            print(f"  hash failed for {f.name}: {e}")
+            size = f.stat().st_size
+        except OSError:
             skipped += 1
             continue
-
-        if h in seen_hashes:
+        is_dupe = False
+        for cand in size_index.get(size, []):
+            try:
+                if _file_hash(f) == _file_hash(cand):
+                    is_dupe = True
+                    break
+            except Exception:
+                continue
+        if is_dupe:
             try:
                 f.unlink()
                 dupes += 1
@@ -1285,12 +1297,12 @@ def organize_library(folder: Path):
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f.name
         if dest.exists():
-            dest = dest_dir / f"{f.stem}_{h[:6]}{f.suffix}"
+            dest = dest_dir / f"{f.stem}_{size}{f.suffix}"
 
         try:
             import shutil
             shutil.move(str(f), str(dest))
-            seen_hashes[h] = dest
+            size_index.setdefault(dest.stat().st_size, []).append(dest)
             moved += 1
             print(f"  moved: {artist} / {album} / {f.name}")
         except Exception as e:
