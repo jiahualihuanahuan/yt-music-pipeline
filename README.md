@@ -1,213 +1,185 @@
 # yt-music-pipeline
 
-Automated YouTube music library builder. Searches, downloads, tags, dedupes,
-and organizes singles into a clean local library with proper metadata.
+Builds and maintains a local MP3 library from YouTube. It has two jobs:
 
-Works on macOS and Linux. Data paths are chosen automatically and can be
-overridden.
+1. **Download mode** (`python main.py`): searches YouTube with keyword and artist queries (or one URL), downloads MP3s with `yt-dlp`, works out title, artist and album with regex plus an optional local LLM, enriches and dedupes them, and files them under `processed/Artist/Album/`.
+2. **Library mode** (`python main.py --process DIR`, `--fix-art`, `--organize`, …): cleans up the tags of an existing MP3 folder in place, and can move well-tagged files into `ORGANIZED_DIR`.
 
-## Pipeline
+There is no test suite. Everything lives in flat Python modules and is set up in `config.py`.
 
-```
-YouTube search --> yt-dlp download (MP3 320k + cover)
-      --> regex parse (title/artist/featured)          └── parallel
-      --> allowlist + local SQLite cross-check          └── as files arrive
-      --> suspicious items --> local Qwen (batch LLM)   └── while downloading
-      --> MusicBrainz/iTunes/Deezer enrichment
-      --> rapidfuzz dedup (threshold 85)
-      --> 1:1 cropped cover + border
-      --> Processed/Artist/Album/Title.mp3
-```
+## Requirements
 
-Downloads and post-processing run in parallel. As soon as a file finishes
-downloading it is parsed, optionally sent to the LLM, enriched, deduped,
-and organized — no need to wait for the whole download phase to finish.
-
-## Files
-
-| File | Role |
-|------|------|
-| `config.py` | All parameters: paths, search queries, artist seeds, LLM endpoint, API keys, dedup threshold |
-| `config_local.py` | Optional local overrides (gitignored). Redefine any variable from config.py here. |
-| `search_download.py` | yt-dlp keyword + artist searches, duration filters, download archive, Deno/cookies support |
-| `regex_parser.py` | Regex title parsing, multi-artist split (feat/ft/with/by/翻唱/cover), allowlist + DB cross-check, suspicious flagging |
-| `parse_meta.py` | Orchestrates regex -> LLM batches -> allowlist updates. Supports incremental use. |
-| `local_db.py` | SQLite cache: artists, albums, tracks from MusicBrainz |
-| `mb_cache_builder.py` | One-time/weekly populate of local_db from MB API |
-| `musicbrainz.py` | Live MB lookup + iTunes/Deezer fallback, canonical artist names |
-| `dedup.py` | rapidfuzz similarity dedup (also incremental) |
-| `artwork.py` | 1:1 crop + border, JPG |
-| `artist_seed.py` | Region helpers for artist lists |
-| `main.py` | Full orchestrator: parallel by default, `--dry-run` / `--skip-dl` / `--fill-missing` / `--reprocess` / `--llm-only` / `--remove-tags` |
-| `setup_deno.sh` | One-time Deno install + PATH setup (required by yt-dlp for YouTube) |
-
-## Quick start
+- Python 3.10+ (the code uses `X | None` type hints)
+- Python packages from `requirements.txt`: `yt-dlp`, `requests`, `rapidfuzz`, `Pillow`, `musicbrainzngs`, `openai`, `mutagen`
+  (`musicbrainzngs` and `openai` are listed but never imported. The code calls the HTTP APIs directly with `requests`.)
+- **ffmpeg** on `PATH`, which `yt-dlp --extract-audio` needs for MP3 conversion and thumbnails (download mode only)
+- **Deno**, used by yt-dlp as its JavaScript runtime for YouTube. Install it with `bash setup_deno.sh`
+- Optional: an OpenAI-compatible LLM endpoint (for example vLLM) and a SearXNG instance (see [LLM](#llm))
 
 ```bash
 pip install -r requirements.txt
-bash setup_deno.sh            # install Deno (needed to avoid 403s)
-# optional: export YouTube cookies to cookies.txt and place in project root
-python mb_cache_builder.py    # populate local DB (slow, ~1 req/sec)
-python main.py --dry-run      # test search + parse
-python main.py                # full parallel run
+bash setup_deno.sh                 # installs Deno, adds ~/.deno/bin to PATH, symlinks to /usr/local/bin if writable
+python mb_cache_builder.py         # optional: pre-fill the local MusicBrainz cache (~1 req/s)
+python main.py --dry-run           # print search queries without downloading
 ```
 
-## Data directory (Mac + Linux)
+## Configuration
 
-The pipeline stores its working files (staging, processed, logs, local SQLite DB, allowlist, cookies) under `BASE_DIR`.
-
-**Default behavior (no config_local.py needed):**
-- If `/Volumes/AI/music` exists and is writable (typical Mac setup) → use it.
-- Otherwise → create and use `~/yt-music-pipeline` (works on Linux and Mac).
-
-You can always override it. Create `config_local.py` (gitignored):
-
-```python
-from pathlib import Path
-BASE_DIR = Path("/mnt/data/docker/navidrome")   # or any writable path
-# optional other overrides
-LLM_BASE_URL = "http://192.168.86.35:8001/v1"
-LLM_API_KEY = "vllm-secret-key"
-LLM_MODEL = "Qwen/Qwen3-8B-AWQ"
-```
-
-The local MusicBrainz cache (`musicbrainz_cache.db`) is created automatically under `BASE_DIR` the first time it is needed.
-
-## Resume after interrupt
-
-If downloads finished (or partially finished) but post-processing was killed:
-
-```bash
-python main.py --skip-dl
-```
-
-This skips the download phase and processes whatever is still in `staging/`.
-Files already moved to `processed/` are left alone.
-
-## One-pass process (recommended for mixed folders)
-
-```bash
-# clean junk -> tags from filename -> LLM on missing/wrong -> fix cover art -> organize
-python main.py --process /path/to/your/music
-
-# skip the last steps if you only want retagging
-python main.py --process /path/to/your/music --no-fix-art --no-organize
-```
-
-`--fix-art` and `--organize` still work on their own.
-
-## Fill missing tags / reprocess existing library
-
-```bash
-# Only retag files missing title, artist, or album (in place)
-python main.py --fill-missing /path/to/your/music
-
-# Force retag everything under a folder (in place)
-python main.py --reprocess /path/to/your/music
-
-# Force LLM-only inference (skip regex, overwrite all tags)
-python main.py --llm-only /path/to/your/music
-
-# Strip all ID3 tags (leaves audio intact)
-python main.py --remove-tags /path/to/your/music
-```
-
-These modes do not require the download staging directory. They only need a writable `BASE_DIR` for the local DB and allowlist.
-
-`--llm-only` sends every filename directly to the LLM with no regex parsing and overwrites the tags in place.
-`--remove-tags` deletes all ID3 tags from the files.
-
-## Local config overrides
-
-Do **not** edit `config.py` directly if you want painless `git pull`s.
-Create `config_local.py` (gitignored) and override any setting:
+All settings live in `config.py`. To change them, create **`config_local.py`** (gitignored) and redefine any variable. It is imported at the end of `config.py`, and the paths derived from `BASE_DIR` are recomputed afterwards.
 
 ```python
 # config_local.py
 from pathlib import Path
-BASE_DIR = Path("/Volumes/AI/music")   # or Linux path
-MAX_PLAYLIST_ITEMS = 50
-LLM_BATCH_SIZE = 3
-LLM_BASE_URL = "http://192.168.86.35:8001/v1"
-LLM_API_KEY = "vllm-secret-key"
+BASE_DIR = Path("/data/yt-music")                 # working data root
+MUSIC_DIR = Path("/srv/music")                     # default DIR for library-mode flags
+ORGANIZED_DIR = Path("/srv/music-organized")       # target of --organize / --process
+LLM_BASE_URL = "http://localhost:8001/v1"
 LLM_MODEL = "Qwen/Qwen3-8B-AWQ"
+BROWSER_COOKIES = "firefox"                        # or None to disable the fallback
 ```
 
-## YouTube 403 / bot checks
+The code reads no environment variables. Everything is set in Python config.
 
-YouTube requires a JavaScript runtime and often cookies.
+### Paths
 
-1. Run `bash setup_deno.sh` once (installs Deno and adds it to PATH).
-2. Export cookies from your browser (extension: **Get cookies.txt LOCALLY**)
-   while logged into YouTube, save as `cookies.txt`, and put it in the project root.
-3. The pipeline auto-detects both and passes the correct yt-dlp flags.
+| Setting | Default | Used for |
+|---|---|---|
+| `BASE_DIR` | `/Volumes/AI/music` if it exists and is writable, else `~/yt-music-pipeline` (created), else `<repo>/data` | root for the paths below |
+| `STAGING_DIR` | `BASE_DIR/staging` | raw yt-dlp downloads (original YouTube filenames) |
+| `PROCESSED_DIR` | `BASE_DIR/processed` | download-mode output: `Artist/Album/<original name>.mp3` |
+| `ARCHIVE_PATH` | `BASE_DIR/downloaded.txt` | yt-dlp download archive (no re-downloads) |
+| `ALLOWLIST_PATH` | `BASE_DIR/artist_allowlist.json` | learned known artists |
+| `LOCAL_DB_PATH` | `BASE_DIR/musicbrainz_cache.db` | SQLite artist/album/track cache |
+| `LOG_DIR` | `BASE_DIR/logs` | run summaries, `--dump-tags` / `--needs-tag` reports |
+| `COOKIES_PATH` | `BASE_DIR/cookies.txt` | optional YouTube cookies (**in `BASE_DIR`, not the repo root**) |
+| `MUSIC_DIR` | `/mnt/data/docker/navidrome/music` | default `DIR` when a library flag is given without one |
+| `ORGANIZED_DIR` | `/mnt/data/docker/navidrome/organized` | well-tagged library. Library scans skip it |
 
-Cookies expire; re-export when you start seeing "Sign in to confirm you're not a bot".
+Note: `MUSIC_DIR` and `ORGANIZED_DIR` are hard-coded Linux/Navidrome paths and are **not** derived from `BASE_DIR`. Override them on other machines.
 
-## Parallel processing
+### Download settings
 
-By default `python main.py` runs downloads and post-processing at the same time:
+`AUDIO_FORMAT="mp3"`, `AUDIO_QUALITY="320"`, `MIN_DURATION=90` / `MAX_DURATION=600` seconds (live streams are excluded too), `MAX_PLAYLIST_ITEMS=1` (max downloads per search), `SEARCH_RESULTS=1` (`ytsearchN`), `SEARCH_SLEEP=1`. `SEARCH_QUERIES` holds weighted keyword queries and `ARTIST_QUERIES` holds about 300 `(artist, region, weight)` seeds across cn/kr/jp/eu/us/ca/au/la. `BROWSER_COOKIES` is not in `config.py`. It defaults to `"chrome"` and is only used when `cookies.txt` is missing.
 
-- A background watcher scans `staging/` for finished MP3s.
-- Files that don't need the LLM are enriched / deduped / organized immediately.
-- Files that need the LLM are batched (default 5) and processed as soon as a batch is full.
-- Dedup is incremental against already-organized tracks.
-- At the end any remaining LLM items are flushed.
+### Other settings
 
-## Artist seeds
+`DEDUP_THRESHOLD=85` (rapidfuzz), the `LLM_*` and `SEARXNG_*` settings (below), `USER_AGENT`, `MB_CONTACT`, and `DRY_RUN`.
 
-~250 artists across 8 regions (cn/kr/jp/eu/us/ca/au/la), weighted by popularity.
-Chinese artists get the highest weight. Edit `ARTIST_QUERIES` in config.py
-or override in `config_local.py`.
+`LASTFM_API_KEY`, `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` and `DISCOGS_TOKEN` are defined but **not used anywhere** in the code.
 
-## API keys (optional)
+## LLM
 
-Put in `config.py` or `config_local.py`:
+Filenames that regex can't parse confidently (and files picked out by the library modes) go to an OpenAI-compatible `POST {LLM_BASE_URL}/chat/completions` in batches.
 
-- `LASTFM_API_KEY` - Last.fm (free at last.fm/api)
-- `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` - Spotify for Developers (free)
-- `DISCOGS_TOKEN` - Discogs (free token)
+| Setting | Default |
+|---|---|
+| `LLM_BASE_URL` | `http://192.168.86.35:8001/v1` |
+| `LLM_API_KEY` | `vllm-secret-key` (sent as a Bearer token if set) |
+| `LLM_MODEL` | `Qwen/Qwen3-8B-AWQ` |
+| `LLM_TIMEOUT` | `None` (no timeout) |
+| `LLM_BATCH_SIZE` | `15` |
+| `LLM_RETRIES` | `2` |
 
-MusicBrainz, iTunes, Deezer, Cover Art Archive need no key.
+Items the LLM is still unsure about get a second pass with web-search context from **SearXNG** (`SEARXNG_BASE_URL`, default `http://192.168.86.35:8099`, up to 3 results each). SearXNG must have the `json` format turned on. If the LLM fails, the regex result is kept (download mode), or the file is left unwritten (library modes).
 
-## Local LLM
+## Download mode
 
-Points at `http://192.168.86.35:8001/v1` (vLLM serving Qwen/Qwen3-8B-AWQ) by default.
-Requires the API key `vllm-secret-key` (Bearer token).
-Only suspicious/failed regex parses go to the LLM.
+```bash
+python main.py                       # keyword + artist searches, parallel post-processing
+python main.py --url <URL>           # only this video/playlist/channel (alias: --playlist)
+python main.py --dry-run             # print the queries that would run, then parse whatever is already in staging/
+python main.py --skip-dl             # no download; post-process what is already in staging/
+```
 
-Current defaults (tune in `config_local.py`):
+What a full run does:
 
-- `LLM_MODEL = "Qwen/Qwen3-8B-AWQ"`
-- `LLM_BATCH_SIZE = 15`
-- `LLM_TIMEOUT = None` (no timeout)
-- `LLM_RETRIES = 2`
+1. **Search & download** (`search_download.py`): runs each weighted keyword query, then each artist query (`"<name> 歌曲 official"` for cn and `"<name> official audio"` otherwise), then up to 15 random artists from the allowlist. yt-dlp extracts MP3 320 audio plus a JPG thumbnail into `staging/`, using the download archive, the duration filter, Deno, and `cookies.txt` (or `--cookies-from-browser`).
+2. **Parallel watcher** (`main.py`): while downloads run, a thread picks up finished MP3s in `staging/`:
+   - regex parse (`regex_parser.py`): splits feat/ft/with/cover markers and checks against the allowlist and the local SQLite DB
+   - album lookup first when title and artist are known
+   - files flagged `needs_llm` are batched (`LLM_BATCH_SIZE`) to the LLM
+   - enrichment (`musicbrainz.py`: MusicBrainz, then iTunes/Deezer fallback, canonical artist names)
+   - incremental fuzzy dedup (`dedup.py`, title+artist `token_sort_ratio >= 85`, keeps the higher-confidence item)
+   - organize: move to `processed/<Artist>/<Album>/<original filename>.mp3`, write a 1:1 600×600 `cover.jpg` with an 8px dark border, fetch lyrics from LRCLIB, write ID3v2.4 tags (cover, lyrics, year), and add a `.json` sidecar with the raw title and parsed fields
+   - afterwards it updates the allowlist and deletes orphaned staging sidecars
+3. A summary (`organized`, `high_confidence`, `llm_used`) is printed and saved to `logs/run_<timestamp>.json`.
 
-If the LLM is unreachable or times out, the regex result is kept and processing continues.
+Album falls back to the title when no valid album is found. Filenames are never renamed.
 
-## Cross-check logic
+`--dry-run` and `--skip-dl` ignore `--url`. Neither runs the parallel watcher. They parse, enrich, dedupe and organize whatever is already in `staging/`. **`--dry-run` still moves and tags files in `staging/`. It only skips the yt-dlp calls.**
 
-1. Regex parses title/artist
-2. Artist in allowlist -> pass
-3. Artist in local SQLite (MB-verified) -> pass (strong signal)
-4. Title in local DB -> weak hint only (covers share titles with originals)
-5. Neither -> flag suspicious -> LLM
-6. Multi-artist markers (feat/ft/with/by/翻唱/cover/原唱/&/,) -> split, all names to allowlist
+## Library mode
 
-## Dedup
+Each flag takes an optional `DIR` (default `MUSIC_DIR`) and works recursively on `*.mp3` files, skipping hidden files. Only **one** command runs per call. If several are given, the first one in this order wins: `--dump-tags`, `--clean-junk`, `--from-filename`, `--needs-tag`, `--fix-art`, `--organize`, `--fix-wrong`, `--process`, `--llm-only`, `--remove-tags`, `--lyrics`, `--fill-missing`, `--reprocess`.
 
-Compares normalized "title + artist" via rapidfuzz token_sort_ratio.
-Score >= 85 = duplicate; keeps the higher-confidence copy.
-Works both in batch mode and incrementally during a parallel run.
+Commands marked "skips organized" ignore files under `ORGANIZED_DIR`.
 
-## Cron
+| Command | What it does |
+|---|---|
+| `--process [DIR]` | One-pass cleanup, see below. Recommended. |
+| `--clean-junk [DIR]` | Strip YouTube junk `TXXX` frames and useless genres. Keeps cover, title, artist, album, lyrics, MusicBrainz. Skips organized. |
+| `--from-filename [DIR]` | Set artist/title from `Artist - Title.mp3` filenames (album falls back to title). Skips organized. |
+| `--needs-tag [DIR]` | Report files missing a valid title/artist/album to `logs/needs_tag_<ts>.txt`. Skips organized. |
+| `--fix-wrong [DIR]` | LLM-retag files whose tags disagree with the filename, or have a bad album or channel-like artist. Skips organized. |
+| `--fix-art [DIR]` | Make sure each MP3 has good embedded art: keep an existing APIC (≥8 KB and ≥200×200), else use a nearby `cover.jpg`/`folder.jpg`/`<name>.jpg`/largest `*.jpg`, else fetch from iTunes, then Deezer (needs title+artist). Art is cropped to 600×600 with a border. Skips organized. |
+| `--organize [DIR]` | Move well-tagged files (valid title, artist, album) to `ORGANIZED_DIR/<Artist>/<Album>/<filename>`. **Deletes** exact duplicates (same size + MD5) of files already organized. Adds `_<size>` to the name if one exists. Removes empty directories in `DIR` and `ORGANIZED_DIR`. Badly tagged files are left in place. |
+| `--fill-missing [DIR]` | Retag (regex/enrich/LLM) only files missing a valid title/artist/album. Files with a MusicBrainz ID and valid artist/title are skipped. |
+| `--reprocess [DIR]` | Re-parse and retag every MP3 in place. |
+| `--llm-only [DIR]` | Send every filename to the LLM (no regex) and overwrite tags in place. |
+| `--remove-tags [DIR]` | Strip text ID3 tags but **keep embedded cover art**. |
+| `--lyrics [DIR]` | Add LRCLIB lyrics (USLT) to files that already have title+artist. |
+| `--dump-tags [DIR]` | Write every file's ID3 frames to `logs/dump_tags_<ts>.txt`. |
 
-See `cron.example` for a weekly Sunday 2 AM example.
+`--fill-missing`, `--reprocess`, `--llm-only`, `--remove-tags`, `--lyrics` and `--dump-tags` use their own `rglob` and **do not** skip `ORGANIZED_DIR`.
 
-## Notes
+### `--process` step by step
 
-- Original YouTube filenames are preserved in staging/ for traceability
-- Processed files get a .json sidecar with raw title + parsed fields
-- Album falls back to song title when no album is found (never guesses wrong)
-- Cover art: 600x600 with 8px border, dark background
-- `cookies.txt`, `config_local.py`, `staging/`, `processed/`, `logs/`, and the download archive are gitignored
+```bash
+python main.py --process /srv/music
+python main.py --process /srv/music --no-fix-art --no-organize   # retag only
+```
+
+1. **clean junk**: same as `--clean-junk`
+2. **from filename**: same as `--from-filename`
+3. **collect**: find files that are not well tagged, or whose tags look wrong (same checks as `--fix-wrong`)
+4. **LLM**: retag those files in batches of `LLM_BATCH_SIZE` and update the allowlist (skipped if nothing needs it)
+5. **fix art**: same as `--fix-art` on `DIR` (skip with `--no-fix-art`)
+6. **organize**: same as `--organize` on `DIR`, moving files into `ORGANIZED_DIR` (skip with `--no-organize`)
+
+`--no-fix-art` and `--no-organize` have no effect without `--process`.
+
+## Other scripts
+
+- `python mb_cache_builder.py`: for each artist in `ARTIST_QUERIES`, fetches up to 100 releases from MusicBrainz into `musicbrainz_cache.db` (1.1 s between artists)
+- `python search_download.py`: download phase only (no post-processing)
+- `python artist_seed.py`: print the top 10 seeds per region
+- `cron.example`: weekly run every Sunday at 02:00 (`main.py >> logs/cron.log`). Fix the path, and note that `logs/` is relative to the repo, not `BASE_DIR`
+
+## Folder layout
+
+```
+BASE_DIR/
+  staging/                     raw downloads + yt-dlp .jpg/.info.json (cleaned up after organize)
+  processed/Artist/Album/      download-mode output: *.mp3, *.json sidecar, cover.jpg
+  logs/                        run_*.json, dump_tags_*.txt, needs_tag_*.txt
+  downloaded.txt               yt-dlp archive
+  artist_allowlist.json
+  musicbrainz_cache.db
+  cookies.txt                  optional
+ORGANIZED_DIR/Artist/Album/    library-mode output from --organize / --process
+```
+
+## Troubleshooting
+
+- **HTTP 403 / "Sign in to confirm you're not a bot"**: run `bash setup_deno.sh` and put a fresh `cookies.txt` (Netscape format, for example from the "Get cookies.txt LOCALLY" extension) in `BASE_DIR`. You get a warning when it's older than 7 days. Without it, yt-dlp falls back to `--cookies-from-browser chrome`. Set `BROWSER_COOKIES` to change or disable this.
+- **"Deno not found" / cookie warnings on every command**: these are printed when `search_download.py` is imported, even in library modes. They are harmless there.
+- **`could not create download dirs`**: `BASE_DIR` isn't writable. Override it in `config_local.py`. Library modes still work.
+- **LLM errors / hangs**: check `LLM_BASE_URL` and `LLM_MODEL`. `LLM_TIMEOUT=None` means a stuck server blocks forever, so set a number.
+- **Nothing gets organized**: only files with a valid title, artist **and** album are moved. Run `--needs-tag` to see why.
+- **No such directory**: library flags default to `MUSIC_DIR` (`/mnt/data/docker/navidrome/music`). Pass `DIR` or override it.
+
+## Known gaps
+
+- `musicbrainz.py` defines `MB_API`, `ITUNES_API` and `DEEZER_API` as Markdown link strings (`"[https://…](https://…)"`), so live MusicBrainz/iTunes/Deezer enrichment requests in that module fail. Cover fetching (`artwork.py`) and `mb_cache_builder.py` use correct URLs.
+- `config.py` ships real-looking Last.fm/Spotify keys that aren't used. Consider removing them.
+- There are no tests.
