@@ -119,7 +119,7 @@ Besides missing tags, a file is re-tagged when: the artist looks like an uploade
 
 ### Non-music
 
-The LLM returns `is_music` and `confidence`. Non-music items (talk clips, vlogs, news, podcasts, cartoon episodes) get no guessed tags. Children's songs, TV-show stage/Live performances and livestream song clips count as music.
+The LLM returns `is_music` and `confidence`. Non-music items (talk clips, vlogs, news, podcasts, cartoon episodes) get no guessed tags. Children's songs and TV-show stage/Live performances count as music; livestream clips (直播歌切 etc.) do not.
 
 With `NON_MUSIC_ACTION = "delete"` (default) non-music answered with confidence `high` is moved to the delete folder (below); anything less confident is only listed as `review` and marked `TXXX:PIPELINE_NON_MUSIC` so `--process`/`--organize` skip it. `"skip"` only marks, `"move"` moves to `NON_MUSIC_DIR`.
 
@@ -129,6 +129,7 @@ With `NON_MUSIC_ACTION = "delete"` (default) non-music answered with confidence 
 
 - non-music with LLM confidence `high`
 - 伴奏 / karaoke-version / off-vocal backing tracks (`deletion.version_reason`; quoted lyrics and "with vocals" markers such as うた入り are ignored)
+- livestream song clips (`直播歌切`, `直播唱`, `【歌切】`, `歌回`, live stream), reason `livestream`; the LLM also marks them non-music
 - DJ versions (`DJ版`, `DJ某某版`, `DJ0.9降速版`, `(DJ…)`, `DJ抖音`; not artists like "DJ Snake")
 
 Every run writes `logs/delete_candidates_<ts>.csv` (path, reason, confidence, action = moved / review / dry-run); actual moves go to `logs/deleted_<ts>.csv` (src, dest, reason). Use `--no-delete` (or `DELETE_ENABLED = False`) to only write the candidates list; `DELETE_VERSIONS = False` keeps 伴奏/DJ files. All library commands skip `DELETE_DIR`. Undo = move files back using `deleted_<ts>.csv`.
@@ -149,7 +150,7 @@ python main.py --merge-artists /srv/music/organized          # dry run: logs/mer
 python main.py --merge-artists /srv/music/organized --apply  # retag artist + move to canonical folder
 ```
 
-Spellings are grouped by their Chinese name (Traditional/Simplified-insensitive); an English-only name joins only when exactly one Chinese name is seen with it in a bilingual credit. Multi-artist credits and junk ("A - Title", `【】`) are never merged. Canonical = the bilingual form if one exists, else the most used spelling. If the file exists, `--build-aliases` writes `*.proposed.json` instead, so your edits are kept. `--merge-artists` never overwrites: same content at the destination is reported as `dupe-skip`, a different file gets a `_<n>` suffix. `--organize` also applies the map.
+Spellings are grouped by their Chinese name (Traditional/Simplified-insensitive); an English-only name joins only when exactly one Chinese name is seen with it in a bilingual credit. Multi-artist credits and junk ("A - Title", `【】`) are never merged. Canonical = the bilingual form if one exists, Simplified Chinese spelling preferred, then the most used; with no Simplified spelling the name is converted to Simplified (artist names only, titles keep their script). If the file exists, `--build-aliases` writes `*.proposed.json` instead, so your edits are kept. `--merge-artists` never overwrites: same content at the destination is reported as `dupe-skip`, a different file gets a `_<n>` suffix. `--organize` also applies the map.
 
 ### Evaluating the prompt on your library
 

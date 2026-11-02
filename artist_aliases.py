@@ -4,8 +4,9 @@ A name is split into parts (CJK run, Latin run, bracketed alias). Each part is f
 (NFKC, Traditional->Simplified when opencc is installed, lowercase, alnum only) and
 names sharing any folded part are grouped. The canonical name of a group is:
   1. a bilingual form (CJK + Latin) if one exists, else any form;
-  2. among those, the most used; ties -> longest, then alphabetical.
-Original script is kept (no conversion is written). The proposed map is written to
+  2. Simplified Chinese spellings first, then the most used; ties -> longest, alphabetical;
+  3. if no Simplified spelling exists, the chosen form is converted to Simplified.
+Only artist names are affected; titles keep their original script. The proposed map is written to
 ARTIST_ALIASES_FILE (JSON {variant: canonical}); edit it and it is used as-is.
 """
 from __future__ import annotations
@@ -15,7 +16,7 @@ import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from match_guard import fold
+from match_guard import fold, _t2s
 
 _CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
 _LAT = re.compile(r"[A-Za-z]")
@@ -42,6 +43,20 @@ def split_name(name: str) -> tuple[list[str], list[str]] | None:
 
 def _bilingual(n: str) -> bool:
     return bool(_CJK.search(n) and _LAT.search(n))
+
+
+def _is_simplified(n: str) -> bool:
+    return _t2s(n) == n
+
+
+def pick_canonical(names: list[str], counts: Counter) -> str:
+    """Jenny: prefer Simplified Chinese. Bilingual forms first; among them (or all names)
+    Simplified spellings first, then most used. If no Simplified spelling exists the
+    chosen form is converted to Simplified (artist names only; titles keep their script)."""
+    pool = [n for n in names if _bilingual(n)] or names
+    simp = [n for n in pool if _is_simplified(n)]
+    best = sorted(simp or pool, key=lambda n: (-counts[n], -len(n), n))[0]
+    return best if simp else _t2s(best)
 
 
 def build(counts: Counter) -> list[dict]:
@@ -74,8 +89,7 @@ def build(counts: Counter) -> list[dict]:
     for names in groups.values():
         if len(names) < 2:
             continue
-        pool = [n for n in names if _bilingual(n)] or names
-        canon = sorted(pool, key=lambda n: (-counts[n], -len(n), n))[0]
+        canon = pick_canonical(names, counts)
         out.append({"canonical": canon, "variants": sorted(names, key=lambda n: -counts[n]),
                     "files": sum(counts[n] for n in names)})
     out.sort(key=lambda g: -g["files"])

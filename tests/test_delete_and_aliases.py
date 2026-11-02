@@ -93,7 +93,7 @@ class Aliases(unittest.TestCase):
         g = artist_aliases.build(Counter({"Jay Chou": 160, "周杰倫 Jay Chou": 150, "周杰伦": 40,
                                           "张三, 李四": 3, "某某 - 夜空": 2, "Solo": 5}))
         self.assertEqual(len(g), 1)
-        self.assertEqual(g[0]["canonical"], "周杰倫 Jay Chou")  # bilingual form wins
+        self.assertEqual(g[0]["canonical"], "周杰伦 Jay Chou")  # bilingual form wins, converted to Simplified
         self.assertEqual(set(g[0]["variants"]), {"Jay Chou", "周杰倫 Jay Chou", "周杰伦"})
 
     def test_latin_name_shared_by_two_people_not_merged(self):
@@ -141,3 +141,20 @@ class Conventions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JennyRound2(unittest.TestCase):
+    def test_livestream(self):
+        for s in ["某歌手「晴天」Cover by 小明 直播歌切", "小明直播唱《夜空》", "【小明】【歌切】温柔的歌声", "Song (live stream)"]:
+            self.assertEqual(deletion.version_reason(s), "livestream", s)
+        for s in ["非歌回｜九张机 • 某某", "某某 - 夜空 (Live)", "【纯享】某某《远方》"]:
+            self.assertNotEqual(deletion.version_reason(s), "livestream", s)
+
+    def test_canonical_prefers_simplified(self):
+        g = artist_aliases.build(Counter({"周杰倫 Jay Chou": 150, "周杰伦 Jay Chou": 2, "Jay Chou": 160}))
+        self.assertEqual(g[0]["canonical"], "周杰伦 Jay Chou")
+
+    def test_canonical_converted_when_no_simplified(self):
+        import match_guard
+        g = artist_aliases.build(Counter({"張三 Zhang San": 5, "Zhang San": 9}))
+        self.assertEqual(g[0]["canonical"], match_guard._t2s("張三 Zhang San"))

@@ -4,6 +4,7 @@ Jenny's policy:
   - non-music (LLM is_music=false, confidence high)  -> moved
   - non-music with lower confidence                 -> review list only, not moved
   - 伴奏 / instrumental-karaoke and DJ versions     -> moved
+  - livestream song clips (直播歌切, 歌回, live stream) -> moved
 Every run writes logs/delete_candidates_<ts>.csv (path, reason, confidence, action)
 and every move is logged to logs/deleted_<ts>.csv (src, dest, reason). Moves keep the
 path relative to the scanned root and never overwrite (a numeric suffix is added).
@@ -30,12 +31,22 @@ _DJ_RE = re.compile(
 )
 
 
+# Livestream song clips (Jenny: not music -> delete). Only clearly marked ones.
+_LIVESTREAM_RE = re.compile(
+    r"直播歌切|直播切片|直播片段|直播回放|直播唱|直播间|直播間|歌切|(?<!非)歌回|歌枠|"
+    r"live\s*stream|livestream|\b(?:twitch|bilibili)\s*(?:live|直播)|[【\[(（]\s*直播\s*[】\])）]",
+    re.I,
+)
+
+
 def version_reason(*texts: str) -> str | None:
-    """'instrumental' / 'dj' if any text (filename stem, title tag) marks such a version."""
+    """'livestream' / 'instrumental' / 'dj' if any text (filename stem, title tag) marks such a version."""
     for t in texts:
         if not t:
             continue
         t = _QUOTED_RE.sub(" ", t)
+        if _LIVESTREAM_RE.search(t):
+            return "livestream"
         if _INSTRUMENTAL_RE.search(t) and not _HAS_VOCAL_RE.search(t):
             return "instrumental"
         if _DJ_RE.search(t):
