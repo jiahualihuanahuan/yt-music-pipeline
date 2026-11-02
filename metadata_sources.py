@@ -11,6 +11,7 @@ import time
 import requests
 
 import config as cfg
+from match_guard import accept
 
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API = "https://api.spotify.com/v1"
@@ -83,8 +84,9 @@ def spotify_lookup(title: str, artist: str) -> dict | None:
             return None  # no keys: don't cache, config may change
         data = _spotify_get("/search", {"q": f"track:{title} artist:{artist}", "type": "track", "limit": 5}, token)
         items = (data.get("tracks") or {}).get("items") or []
-        want = _norm(artist)
-        hit = next((t for t in items if any(_norm(a.get("name")) == want for a in t.get("artists", []))), None)
+        hit = next((t for t in items
+                    if any(accept(title, artist, t.get("name", ""), a.get("name", "")) for a in t.get("artists", []))),
+                   None)
         if hit:
             alb = hit.get("album") or {}
             imgs = sorted(alb.get("images") or [], key=lambda i: -(i.get("width") or 0))
@@ -129,6 +131,8 @@ def lastfm_lookup(title: str, artist: str) -> dict | None:
         }, headers={"User-Agent": getattr(cfg, "USER_AGENT", "music-pipeline")}, timeout=10)
         r.raise_for_status()
         t = r.json().get("track")
+        if t and not accept(title, artist, t.get("name", ""), (t.get("artist") or {}).get("name", "")):
+            t = None  # autocorrect jumped to a different song
         if t:
             alb = t.get("album") or {}
             imgs = [i.get("#text") for i in alb.get("image") or [] if i.get("#text")]
@@ -155,7 +159,7 @@ def supplement(meta: dict) -> dict:
     """
     title = meta.get("title")
     artist = meta.get("artist_canonical") or meta.get("artist")
-    if not title or not artist:
+    if not title or not artist or meta.get("is_music") is False:
         return meta
     for src_name, fn in (("spotify", spotify_lookup), ("lastfm", lastfm_lookup)):
         need = [k for k in ("album", "album_year", "genre", "cover_url") if not meta.get(k)]

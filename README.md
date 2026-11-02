@@ -81,6 +81,8 @@ Note: `MUSIC_DIR` and `ORGANIZED_DIR` are hard-coded Linux/Navidrome paths and a
 4. **Last.fm** `track.getInfo` (≤4 req/s): album, album image, and top tags as the genre (junk tags like "seen live" are dropped)
 5. **iTunes**, then **Deezer**, only if the album is still missing
 
+**Match guard** (`match_guard.py`): a Spotify, Last.fm, iTunes or Deezer result is only used when both its title and artist are ≥85 similar (rapidfuzz) to what was searched, ignoring case, brackets like `(From "Moana")`, fullwidth forms and Traditional/Simplified Chinese. This stops "Falling You" from becoming Céline Dion's "Falling into You". Items flagged non-music are never enriched.
+
 A source is skipped silently when its key is empty. On an HTTP or network error it logs one line and moves on. Spotify and Last.fm results are cached in memory per (title, artist) for the run.
 
 Genre is written to the ID3 `TCON` tag. During download-mode organize, the Spotify/Last.fm cover is preferred over the YouTube thumbnail. `--fix-art` fetches covers in this order: Spotify, iTunes, Deezer, Last.fm.
@@ -98,9 +100,40 @@ On 56 realistic YouTube titles (`python tests/eval_regex.py`):
 
 All 17 wrong `--from-filename` results looked well-tagged afterwards, so `--process` never sent them to the LLM.
 
+### High-precision title rules (`title_rules.py`, on by default)
+
+Instead of the general regex, a small set of rules handles only a few unambiguous shapes and abstains on everything else (`USE_TITLE_RULES = True`):
+
+- lyric-channel uploads: `Artist - Title『lyric line』【動態歌詞…】` (`⧸` splits featured artists)
+- covers: `【Performer】…【Title】…Cover：Original` / `【Performer】…Title-Cover：Original`
+- `Artist《Title》Official MV`
+- `Artist - Title (Official Video|Audio)`
+
+On a 203-row sample of a real library they accepted 55 rows (27%) at 98.2% precision (54/55; the miss kept an uploader's typo). On the 56 synthetic titles they accepted 12, all correct. Everything else goes to the LLM.
+
+`clean_raw()` also normalizes fullwidth punctuation (NFKC), `⧸` → `/`, and strips a trailing `[videoId]` before anything reaches the LLM; `--organize` drops `[videoId]` from file names.
+
+### What `--process` sends to the LLM
+
+Besides missing tags, a file is re-tagged when: the artist looks like an uploader (`…VEVO`, `… - Topic`, `Disney…`, `Holy007`-style handles), the title still has `『』【】`/Official/HD junk, the title tag never appears in the filename (Traditional/Simplified-insensitive), artist equals title, the title rules disagree with the tags, or (with `COVER_ARTIST = "performer"`) a cover is tagged with the original singer.
+
+### Non-music
+
+The LLM returns `is_music` and `confidence`. Non-music items (talk clips, vlogs, news, podcasts, cartoons) get no guessed tags; they are marked with `TXXX:PIPELINE_NON_MUSIC` and skipped by `--process`/`--organize` (`NON_MUSIC_ACTION = "skip"`), or moved to `NON_MUSIC_DIR` with `"move"`. Low-confidence answers are not written.
+
+### Evaluating the prompt on your library
+
+```bash
+python main.py --dump-tags ...   # or any CSV with relative_path, filename, artist, title, album
+python tests/eval_llm_prompt.py --csv sample.csv --dry-run                 # show what would be sent
+python tests/eval_llm_prompt.py --csv sample.csv --labels labels.json      # real LLM calls, prints precision
+```
+
+Writes `logs/llm_eval_<time>.csv`; never touches music files.
+
 ## LLM
 
-Filenames that regex can't parse confidently (and files picked out by the library modes) go to an OpenAI-compatible `POST {LLM_BASE_URL}/chat/completions` in batches.
+Filenames the title rules don't accept (and files picked out by the library modes) go to an OpenAI-compatible `POST {LLM_BASE_URL}/chat/completions` in batches.
 
 | Setting | Default |
 |---|---|
@@ -210,4 +243,4 @@ ORGANIZED_DIR/Artist/Album/    library-mode output from --organize / --process
 
 - Older commits of `config.py` contain Last.fm/Spotify keys. Rotate them.
 - Spotify artist genres are often empty for newer apps or less-known artists. Last.fm tags then supply the genre.
-- Tests cover the metadata sources, config overrides and the regex switch, not the full pipeline.
+- Tests cover the metadata sources, config overrides, the regex switch, title rules, wrong-tag detection, the enrichment guard and non-music handling (synthetic fixtures), not the full pipeline.

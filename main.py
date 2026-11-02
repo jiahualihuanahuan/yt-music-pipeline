@@ -26,6 +26,7 @@ import shutil
 import threading
 import time
 import re
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 import glob
@@ -63,9 +64,42 @@ INVALID_ARTISTS = {
 
 # YouTube / useless genres to clear
 JUNK_GENRES = {
+    # every YouTube video category (yt-dlp writes these into TCON)
     "music", "entertainment", "people & blogs", "people and blogs",
-    "gaming", "news", "education", "comedy", "howto & style", "film & animation",
+    "gaming", "news", "news & politics", "education", "comedy",
+    "howto & style", "film & animation", "travel & events", "sports",
+    "science & technology", "pets & animals", "autos & vehicles",
+    "nonprofits & activism", "shows", "trailers", "movies",
 }
+
+# Artist tags that are really the YouTube uploader / channel, not a performer
+_UPLOADER_RE = re.compile(
+    r"(vevo$|\s-\stopic$|^uploads from |official|channel|records$|music$|\btv$|lyrics?$|"
+    r"^disney|^\w*\d{3,}$|^[a-z]+[0-9]+[a-z0-9]*$|stories with|kids|playlist)",
+    re.I,
+)
+
+# Title junk left by lyric-video channels / YouTube
+_TITLE_JUNK_RE = re.compile(
+    r"(『|』|【|】|official\s+(music\s+)?(video|audio|mv)|\[high quality\]|\bhd\b|"
+    r"with lyrics|sing-a-long|動態歌詞|动态歌词|完整版|\[[A-Za-z0-9_-]{11}\])",
+    re.I,
+)
+
+NON_MUSIC_TAG = "PIPELINE_NON_MUSIC"
+
+
+def _looks_like_uploader(artist: str, path: Path | None = None) -> bool:
+    a = (artist or "").strip()
+    if not a:
+        return False
+    if _UPLOADER_RE.search(a):
+        return True
+    # artist equals a playlist-ish folder name ("Mix - X", "Top Songs - X")
+    if path is not None and re.match(r"^(mix|top songs|uploads from)\s*-?\s*", path.parent.name, re.I) \
+            and a.lower() == path.parent.name.lower():
+        return True
+    return False
 
 # TXXX keys that are YouTube/yt-dlp junk (keep FEATURED, MusicBrainz*, etc.)
 JUNK_TXXX_PREFIXES = (
@@ -285,7 +319,13 @@ def _write_tags(
 def organize_one(meta):
     """Move one staged file into Processed/Artist/Album/<original_youtube_name>.mp3
     Filename is never renamed. Only folder and ID3 tags change.
+    Items the LLM flagged as non-music are left in staging (see NON_MUSIC_ACTION).
     """
+    if meta.get("is_music") is False:
+        src = STAGING_DIR / meta.get("file", "")
+        if src.exists():
+            _handle_non_music(src, meta)
+        return None
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     src = STAGING_DIR / meta["file"]
     if not src.exists():
@@ -516,6 +556,10 @@ def _retag_one(meta: dict):
     if not path.exists():
         return
 
+    if meta.get("is_music") is False:
+        _handle_non_music(path, meta)
+        return
+
     authoritative = bool(meta.get("llm_authoritative"))
 
     try:
@@ -606,6 +650,62 @@ def _retag_one(meta: dict):
         "confidence": meta.get("confidence"),
         "llm_notes": meta.get("llm_notes"),
     }, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _is_marked_non_music(path: Path) -> bool:
+    try:
+        from mutagen.id3 import ID3
+        return bool(ID3(path).getall(f"TXXX:{NON_MUSIC_TAG}"))
+    except Exception:
+        return False
+
+
+def _handle_non_music(path: Path, meta: dict):
+    """Never guess tags for talk clips, vlogs, news, podcasts, cartoons...
+
+    NON_MUSIC_ACTION = "skip" (default): mark the file (TXXX:PIPELINE_NON_MUSIC) so
+    --process / --organize leave it alone; tags are otherwise untouched.
+    NON_MUSIC_ACTION = "move": also move it to NON_MUSIC_DIR (keeps the folder name).
+    """
+    import config as _cfg
+    action = getattr(_cfg, "NON_MUSIC_ACTION", "skip")
+    reason = meta.get("llm_notes") or "non-music"
+    try:
+        from mutagen.id3 import ID3, TXXX, ID3NoHeaderError
+        try:
+            tags = ID3(path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        tags.delall(f"TXXX:{NON_MUSIC_TAG}")
+        tags.add(TXXX(encoding=3, desc=NON_MUSIC_TAG, text=[str(reason)[:200]]))
+        tags.save(path)
+    except Exception as e:
+        print(f"  could not mark non-music {path.name}: {e}")
+    if action == "move":
+        dest_root = Path(getattr(_cfg, "NON_MUSIC_DIR", MUSIC_DIR / "_non_music"))
+        dest = dest_root / path.parent.name / path.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            shutil.move(str(path), str(dest))
+            print(f"non-music -> {dest}")
+            return
+    print(f"non-music (left as is): {path.name}  [{reason}]")
+
+
+def _apply_rules(meta: dict) -> bool:
+    """Fill title/artist from title_rules when it is sure. Returns True if used."""
+    import config as _cfg
+    if not getattr(_cfg, "USE_TITLE_RULES", True):
+        return False
+    import title_rules
+    r = title_rules.parse(meta.get("raw") or "")
+    if not r:
+        return False
+    meta.update(title=r["title"], artist=r["artist"], featured=r["featured"],
+                original_artist=r.get("original_artist"), album=None,
+                confidence="rules", needs_llm=False, llm_notes=f"rules:{r['rule']}",
+                llm_authoritative=True, is_music=True)
+    return True
 
 
 def reprocess_folder(folder: Path, only_missing: bool = False):
@@ -918,6 +1018,13 @@ def clean_junk_folder(folder: Path):
             if genre in JUNK_GENRES:
                 tags.delall("TCON")
                 changed = True
+
+            # Clear comments that are only a YouTube URL (yt-dlp --embed-metadata)
+            for key in [k for k in tags.keys() if k.startswith("COMM")]:
+                text = " ".join(str(t) for t in (tags[key].text or [])).strip()
+                if not text or re.fullmatch(r"https?://(www\.)?(youtube\.com|youtu\.be)\S*", text):
+                    tags.delall(key)
+                    changed = True
 
             if changed:
                 audio.save()
@@ -1267,7 +1374,7 @@ def organize_library(folder: Path):
 
     for i, f in enumerate(all_mp3s, 1):
         tags = _read_tags(f)
-        if not _is_well_tagged(tags):
+        if not _is_well_tagged(tags) or _is_marked_non_music(f):
             skipped += 1
             continue
 
@@ -1302,7 +1409,9 @@ def organize_library(folder: Path):
 
         dest_dir = ORGANIZED_DIR / _safe_name(artist) / _safe_name(album)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / f.name
+        import title_rules
+        clean_stem = title_rules.VIDEO_ID_RE.sub("", f.stem).strip() or f.stem
+        dest = dest_dir / f"{clean_stem}{f.suffix}"
         if dest.exists():
             dest = dest_dir / f"{f.stem}_{size}{f.suffix}"
 
@@ -1348,6 +1457,40 @@ def _tags_look_wrong(path: Path, tags: dict) -> list[str]:
     # Artist looks like a channel / uploader
     if artist and artist.lower() in INVALID_ARTISTS:
         reasons.append("bad_artist")
+    elif _looks_like_uploader(artist, path):
+        reasons.append("artist_is_uploader")
+
+    # Title still carries lyric-video / YouTube junk
+    if title and _TITLE_JUNK_RE.search(title):
+        reasons.append("title_junk")
+
+    from match_guard import fold
+    stem_f = fold(path.stem)
+    # Title that never appears in the filename: usually a different song or a talk clip
+    if title and stem_f and fold(title) and fold(re.sub(r"\s*[(（][^)）]*[)）]\s*$", "", title)) not in stem_f:
+        reasons.append("title_not_in_filename")
+    if title and artist and fold(title) == fold(artist):
+        reasons.append("artist_equals_title")
+    # Cover uploads tagged with the ORIGINAL singer (COVER_ARTIST = "performer")
+    import config as _cfg0
+    if artist and getattr(_cfg0, "COVER_ARTIST", "performer") == "performer":
+        m = re.search(r"(cover|原唱|翻自)\s*[:：]?\s*(.+)$", unicodedata.normalize("NFKC", path.stem), re.I)
+        if m and fold(artist) and fold(artist) in fold(m.group(2)) and "artist_mismatch" not in reasons:
+            reasons.append("cover_tagged_as_original")
+
+    # High-precision rules disagree with the tags (e.g. a cover tagged as the original singer)
+    try:
+        import title_rules
+        import config as _cfg
+        r = title_rules.parse(path.stem) if getattr(_cfg, "USE_TITLE_RULES", True) else None
+    except Exception:
+        r = None
+    if r:
+        from match_guard import title_ok, artist_ok
+        if title and not title_ok(r["title"], title) and "title_mismatch" not in reasons:
+            reasons.append("title_mismatch")
+        if artist and not artist_ok(r["artist"], artist) and "artist_mismatch" not in reasons:
+            reasons.append("artist_mismatch")
 
     return reasons
 
@@ -1459,6 +1602,8 @@ def _retag_folder(folder: Path):
     all_mp3s = _list_mp3s(folder)
     need = []
     for f in all_mp3s:
+        if _is_marked_non_music(f):
+            continue
         tags = _read_tags(f)
         reasons = []
         if not _is_well_tagged(tags):
@@ -1501,7 +1646,12 @@ def _retag_folder(folder: Path):
         fb = _folder_fallback(f)
         meta["folder_artist"] = fb["folder_artist"]
         meta["folder_album"] = fb["folder_album"]
+        meta["folder_hint"] = f.parent.name
         print(f"  need ({', '.join(reasons)}): {f.name}")
+        if _apply_rules(meta):
+            _retag_one(meta)
+            results.append(meta)
+            continue
         llm_buf.append(meta)
         if len(llm_buf) >= LLM_BATCH_SIZE:
             flush()

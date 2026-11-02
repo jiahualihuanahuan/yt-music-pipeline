@@ -51,6 +51,9 @@ MUSIC_DIR = Path("/mnt/data/docker/navidrome/music")
 # Override with ORGANIZED_DIR in config_local.py if needed.
 ORGANIZED_DIR = Path("/mnt/data/docker/navidrome/organized")
 
+# Where non-music items go when NON_MUSIC_ACTION = "move" (see Parsing below).
+NON_MUSIC_DIR = Path("/mnt/data/docker/navidrome/non_music")
+
 # ---------- Download ----------
 AUDIO_FORMAT = "mp3"
 AUDIO_QUALITY = "320"          # VBR ~320k
@@ -225,6 +228,20 @@ ARTIST_QUERIES = [
 # confident wrong tags, so by default every file goes straight to the LLM.
 # Set True to restore the old regex-first behaviour.
 USE_REGEX_PARSER = False
+
+# High-precision rules (title_rules.py) for a few unambiguous title shapes
+# (lyric-channel "Artist - Title『lyric』【…】", "【Performer】… Cover：Original",
+# "Artist《Title》Official MV", "Artist - Title (Official Video)"). They abstain on
+# everything else, which then goes to the LLM. 98% precision on the sample library.
+USE_TITLE_RULES = True
+
+# What to do with items the LLM flags as not music (talk clips, vlogs, news,
+# podcasts, cartoons): "skip" = mark and leave in place, "move" = move to NON_MUSIC_DIR.
+NON_MUSIC_ACTION = "skip"
+
+# Covers: "performer" = artist tag is who sings on the file (the original singer is
+# noted, not tagged); "original" = keep the original singer as artist.
+COVER_ARTIST = "performer"
 
 # ---------- Dedup ----------
 DEDUP_THRESHOLD = 85  # rapidfuzz score on "title + artist"; >= this = duplicate

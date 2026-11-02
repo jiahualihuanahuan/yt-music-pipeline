@@ -7,6 +7,7 @@ import threading
 import time
 import requests
 from metadata_sources import supplement
+from match_guard import accept
 from config import MB_CONTACT, USER_AGENT, ARTIST_QUERIES
 from local_db import (
     connect, init_db, lookup_artist, lookup_track,
@@ -88,7 +89,7 @@ def _enrich_core(meta):
     try:
         artist_name = meta.get("artist")
         title_name = meta.get("title")
-        if not artist_name:
+        if not artist_name or meta.get("is_music") is False:
             return meta
 
         # 1. Local DB Track + Artist Lookup (populates canonical artist, album, and year instantly)
@@ -154,7 +155,7 @@ def _enrich_core(meta):
                     timeout=12,
                 )
                 for it in r.json().get("results", []):
-                    if normalize(it.get("artistName", "")) == normalize(artist_name):
+                    if accept(title_name or "", artist_name, it.get("trackName", ""), it.get("artistName", "")):
                         meta["artist_canonical"] = meta.get("artist_canonical") or it["artistName"]
                         if not meta.get("album") and it.get("collectionName"):
                             meta["album"] = it["collectionName"]
@@ -173,7 +174,7 @@ def _enrich_core(meta):
                     timeout=12,
                 )
                 for d in r.json().get("data", []):
-                    if normalize(d.get("artist", {}).get("name", "")) == normalize(artist_name):
+                    if accept(title_name or "", artist_name, d.get("title", ""), d.get("artist", {}).get("name", "")):
                         meta["artist_canonical"] = meta.get("artist_canonical") or d["artist"]["name"]
                         if not meta.get("album") and d.get("album", {}).get("title"):
                             meta["album"] = d["album"]["title"]
