@@ -84,6 +84,18 @@ python main.py --skip-dl
 This skips the download phase and processes whatever is still in `staging/`.
 Files already moved to `processed/` are left alone.
 
+## One-pass process (recommended for mixed folders)
+
+```bash
+# clean junk -> tags from filename -> LLM on missing/wrong -> fix cover art -> organize
+python main.py --process /path/to/your/music
+
+# skip the last steps if you only want retagging
+python main.py --process /path/to/your/music --no-fix-art --no-organize
+```
+
+`--fix-art` and `--organize` still work on their own.
+
 ## Fill missing tags / reprocess existing library
 
 ```bash
