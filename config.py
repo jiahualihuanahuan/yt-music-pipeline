@@ -220,6 +220,12 @@ ARTIST_QUERIES = [
     ("Rosalía", "la", 8), ("C. Tangana", "la", 7),
 ]
 
+# ---------- Parsing ----------
+# Regex title parsing was evaluated (tests/eval_regex.py) and produced too many
+# confident wrong tags, so by default every file goes straight to the LLM.
+# Set True to restore the old regex-first behaviour.
+USE_REGEX_PARSER = False
+
 # ---------- Dedup ----------
 DEDUP_THRESHOLD = 85  # rapidfuzz score on "title + artist"; >= this = duplicate
 
@@ -241,10 +247,10 @@ SEARXNG_BASE_URL = "http://192.168.86.35:8099"
 SEARXNG_MAX_RESULTS = 5
 
 # ---------- API keys (optional) ----------
-LASTFM_API_KEY = "f205c5985189bf0a5bbac030e4dda140"
-SPOTIFY_CLIENT_ID = "2f59486b34844ea39f47fba56870c236"
-SPOTIFY_CLIENT_SECRET = "24f60614bf0344fd8f119ba0e2e99630"
-DISCOGS_TOKEN = ""
+LASTFM_API_KEY = ""          # set in config_local.py (https://www.last.fm/api/account/create)
+SPOTIFY_CLIENT_ID = ""       # set in config_local.py (developer.spotify.com dashboard)
+SPOTIFY_CLIENT_SECRET = ""
+DISCOGS_TOKEN = ""           # currently unused
 
 # ---------- Misc ----------
 USER_AGENT = "music-pipeline/1.0 (personal; contact via GitHub)"

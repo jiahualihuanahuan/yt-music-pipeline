@@ -222,13 +222,14 @@ def _write_tags(
     cover_path: Path = None,
     lyrics: str = None,
     allow_clear: bool = False,
+    genre: str = None,
 ):
     """Write ID3v2.4 tags including embedded cover art (APIC) and release year (TDRC).
     If allow_clear=True, empty strings remove the corresponding text tag instead of writing "Unknown".
     """
     try:
         from mutagen.mp3 import MP3
-        from mutagen.id3 import TIT2, TPE1, TALB, TPE2, TDRC, TXXX, APIC, USLT
+        from mutagen.id3 import TIT2, TPE1, TALB, TPE2, TDRC, TXXX, APIC, USLT, TCON
         audio = MP3(path)
         if audio.tags is None:
             audio.add_tags()
@@ -250,6 +251,9 @@ def _write_tags(
             tags["TDRC"] = TDRC(encoding=3, text=str(year))
         elif allow_clear:
             tags.delall("TDRC")
+
+        if genre and str(genre).strip():
+            tags["TCON"] = TCON(encoding=3, text=str(genre).strip())
 
         if featured:
             tags["TXXX:FEATURED"] = TXXX(encoding=3, desc="FEATURED", text=", ".join(featured))
@@ -313,7 +317,13 @@ def organize_one(meta):
     if not thumb.exists():
         thumb = Path(str(src) + ".jpg")
     cover_dst = dest_dir / "cover.jpg"
-    if thumb.exists():
+    used_remote = False
+    if meta.get("cover_url") and not cover_dst.exists():
+        raw_cover = dest_dir / ".cover_raw.jpg"
+        if download_cover(meta["cover_url"], raw_cover):
+            used_remote = process_cover(raw_cover, cover_dst)
+        raw_cover.unlink(missing_ok=True)
+    if thumb.exists() and not used_remote:
         process_cover(thumb, cover_dst)
 
     _cleanup_staging_sidecars(src)
@@ -334,6 +344,7 @@ def organize_one(meta):
         year=meta.get("album_year"),
         cover_path=cover_dst if cover_dst.exists() else None,
         lyrics=lyrics_text,
+        genre=meta.get("genre"),
     )
 
     meta["processed_path"] = str(dest)
@@ -574,6 +585,7 @@ def _retag_one(meta: dict):
         cover_path=cover_path if cover_path.exists() else None,
         lyrics=lyrics_text,
         allow_clear=allow_clear,
+        genre=meta.get("genre"),
     )
     album_disp = album or "(cleared)"
     artist_disp = artist or "(cleared)"
@@ -1408,11 +1420,10 @@ def process_folder(folder: Path, fix_art: bool = True, organize: bool = True):
     """One-pass for a mixed library.
 
     1. Strip YouTube junk tags
-    2. Apply safe filename artist/title where it matches
-    3. LLM-retag only files that are missing tags or look wrong
-    4. Leave well-tagged files alone
-    5. Embed cover art (fix_art_folder), unless fix_art=False
-    6. Move well-tagged files into ORGANIZED_DIR (organize_library), unless organize=False
+    2. Collect files whose tags are missing or look wrong (well-tagged files are left alone)
+    3. LLM-retag those files (no filename regex)
+    4. Embed cover art (fix_art_folder), unless fix_art=False
+    5. Move well-tagged files into ORGANIZED_DIR (organize_library), unless organize=False
     Skips the organized/ folder.
     """
     folder = folder.resolve()
@@ -1423,15 +1434,15 @@ def process_folder(folder: Path, fix_art: bool = True, organize: bool = True):
     _retag_folder(folder)
 
     if fix_art:
-        print("\n--- step 5: fix art ---")
+        print("\n--- step 4: fix art ---")
         fix_art_folder(folder)
     if organize:
-        print("\n--- step 6: organize ---")
+        print("\n--- step 5: organize ---")
         organize_library(folder)
 
 
 def _retag_folder(folder: Path):
-    """Steps 1-4 of process_folder (tag cleanup + LLM on missing/wrong)."""
+    """Steps 1-3 of process_folder (tag cleanup + LLM on missing/wrong)."""
     folder = folder.resolve()
     if not folder.is_dir():
         print(f"not a directory: {folder}")
@@ -1442,10 +1453,9 @@ def _retag_folder(folder: Path):
     print("\n--- step 1: clean junk ---")
     clean_junk_folder(folder)
 
-    print("\n--- step 2: from filename ---")
-    from_filename_folder(folder)
-
-    print("\n--- step 3: collect missing + wrong ---")
+    # Filename regex (from_filename_folder) is no longer run here: it wrote
+    # confident wrong tags that then skipped the LLM. See tests/eval_regex.py.
+    print("\n--- step 2: collect missing + wrong ---")
     all_mp3s = _list_mp3s(folder)
     need = []
     for f in all_mp3s:
@@ -1462,7 +1472,7 @@ def _retag_folder(folder: Path):
         print("nothing to do")
         return
 
-    print("\n--- step 4: LLM on remaining ---")
+    print("\n--- step 3: LLM on remaining ---")
     llm_buf = []
     results = []
 
@@ -1579,7 +1589,7 @@ def main():
     ap.add_argument("--clean-junk", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help=f"Phase 1: strip YouTube junk TXXX and useless genres (default: {MUSIC_DIR})")
     ap.add_argument("--from-filename", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
-                    help=f"Phase 2: set artist/title from 'Artist - Title' filenames (default: {MUSIC_DIR})")
+                    help=f"(regex, unreliable; not used by --process) set artist/title from 'Artist - Title' filenames (default: {MUSIC_DIR})")
     ap.add_argument("--needs-tag", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help=f"Phase 3: list files that still need tagging (default: {MUSIC_DIR})")
     ap.add_argument("--fix-art", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
@@ -1589,7 +1599,7 @@ def main():
     ap.add_argument("--fix-wrong", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help="retag files whose tags disagree with the filename or look noisy")
     ap.add_argument("--process", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
-                    help="one-pass for mixed folders: clean junk, from-filename, LLM only missing+wrong, then fix-art and organize")
+                    help="one-pass for mixed folders: clean junk, LLM on missing+wrong tags, then fix-art and organize")
     ap.add_argument("--no-fix-art", action="store_true", help="with --process: skip the fix-art step")
     ap.add_argument("--no-organize", action="store_true", help="with --process: skip the organize step")
     ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",

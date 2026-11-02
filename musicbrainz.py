@@ -6,15 +6,16 @@ Uses local SQLite cache first (both track+album and artist), then live MB API
 import threading
 import time
 import requests
+from metadata_sources import supplement
 from config import MB_CONTACT, USER_AGENT, ARTIST_QUERIES
 from local_db import (
     connect, init_db, lookup_artist, lookup_track,
     upsert_artist, upsert_album, upsert_track, normalize,
 )
 
-MB_API = "[https://musicbrainz.org/ws/2](https://musicbrainz.org/ws/2)"
-ITUNES_API = "[https://itunes.apple.com/search](https://itunes.apple.com/search)"
-DEEZER_API = "[https://api.deezer.com/search](https://api.deezer.com/search)"
+MB_API = "https://musicbrainz.org/ws/2"
+ITUNES_API = "https://itunes.apple.com/search"
+DEEZER_API = "https://api.deezer.com/search"
 HEADERS = {"User-Agent": f"{USER_AGENT} ({MB_CONTACT})"}
 
 _SEED_CASING = {normalize(name): name for name, _, _ in ARTIST_QUERIES}
@@ -68,7 +69,20 @@ def _proper_case(name: str, db_display: str | None = None) -> str:
 
 
 def enrich(meta):
-    """Given parsed meta dict, return enriched meta with canonical artist, album, and year."""
+    """Return meta enriched with canonical artist, album, year, genre, cover_url.
+
+    Precedence: local MB cache -> live MusicBrainz -> Spotify -> Last.fm
+    -> iTunes -> Deezer. Later sources only fill fields still missing.
+    """
+    meta = _enrich_core(meta)
+    try:
+        meta = supplement(meta)
+    except Exception as e:
+        print(f"supplement failed: {e}")
+    return meta
+
+
+def _enrich_core(meta):
     init_db()
     conn = connect()
     try:
@@ -123,6 +137,13 @@ def enrich(meta):
                 conn.commit()
                 if meta.get("album"):
                     return meta
+
+        # 3b. Spotify, then Last.fm (album/year/genre/cover; only fill gaps)
+        if not meta.get("album"):
+            supplement(meta)
+            if meta.get("album"):
+                meta["artist_canonical"] = meta.get("artist_canonical") or _proper_case(artist_name)
+                return meta
 
         # 4. iTunes Search Fallback (for canonical artist or missing album)
         if not meta.get("album") or not meta.get("artist_canonical"):

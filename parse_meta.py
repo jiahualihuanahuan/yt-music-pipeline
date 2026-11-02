@@ -235,10 +235,16 @@ def _load_info_and_channel(mp3_path: Path) -> tuple[dict | None, str | None]:
 def parse_one(path: Path) -> dict:
     """Parse a single mp3 by filename + optional yt-dlp metadata."""
     info, channel_hint = _load_info_and_channel(path)
-    try:
-        meta = parse_title(path.stem, info_meta=info)
-    except TypeError:
-        meta = parse_title(path.stem)
+    import config as _cfg
+    if not getattr(_cfg, "USE_REGEX_PARSER", False):
+        # Regex parsing disabled (see tests/eval_regex.py): every file goes to the LLM.
+        meta = {"title": None, "artist": None, "featured": [], "album": None,
+                "confidence": "none", "needs_llm": True, "raw": path.stem}
+    else:
+        try:
+            meta = parse_title(path.stem, info_meta=info)
+        except TypeError:
+            meta = parse_title(path.stem)
     meta["file"] = path.name
     if channel_hint:
         meta["channel_hint"] = channel_hint
