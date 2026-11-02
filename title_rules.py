@@ -36,7 +36,7 @@ _GUILLEMET_RE = re.compile(r"^(?P<a>[^《》【】\s!?！？,，。:：\-–][^�
 # Latin "Artist - Title (… Official Video/Audio)"
 _OFFICIAL_RE = re.compile(r"^(?P<a>[^-–()\[\]]+?)\s+[-–]\s+(?P<t>[^()\[\]]+?)\s*(\((from|feat)[^)]*\)\s*)?\((official\s+(music\s+)?(video|audio))\)\s*$", re.I)
 
-_BAD_ARTIST = re.compile(r"\||流行歌曲|热门|熱門|翻唱|cover|合集|专辑|專輯|直播|電音|电音|edm|disney|vevo|playlist|cast\b|various artists|^the lion king|official", re.I)
+_BAD_ARTIST = re.compile(r"\||原唱|[(（]\s*live\s*[)）]|流行歌曲|热门|熱門|翻唱|cover|合集|专辑|專輯|直播|電音|电音|edm|disney|vevo|playlist|cast\b|various artists|^the lion king|official", re.I)
 
 
 def clean_raw(raw: str) -> str:
@@ -47,7 +47,8 @@ def clean_raw(raw: str) -> str:
 
 
 def _split(a: str) -> list[str]:
-    a = re.sub(r"[(（][^)）]*[)）]", "", a).strip()
+    # Keep a bracketed alias ("LBI利比(時柏塵)"); drop only credit notes like "(feat. X)" / "(cover)".
+    a = re.sub(r"\s*[(（]\s*(?:feat\.?|ft\.?|featuring|cover|翻唱|原唱)[^)）]*[)）]", "", a, flags=re.I).strip()
     parts = [p.strip() for p in re.split(r"\s*(?:/|、|,|&| x | ft\.? | feat\.? )\s*", a) if p.strip()]
     # "王蓉 龍梅子 崔子格": space-separated Chinese names (not "Jess 佳仙" / "夏天Alex")
     if len(parts) == 1 and " " in parts[0]:

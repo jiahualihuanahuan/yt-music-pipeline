@@ -119,7 +119,37 @@ Besides missing tags, a file is re-tagged when: the artist looks like an uploade
 
 ### Non-music
 
-The LLM returns `is_music` and `confidence`. Non-music items (talk clips, vlogs, news, podcasts, cartoons) get no guessed tags; they are marked with `TXXX:PIPELINE_NON_MUSIC` and skipped by `--process`/`--organize` (`NON_MUSIC_ACTION = "skip"`), or moved to `NON_MUSIC_DIR` with `"move"`. Low-confidence answers are not written.
+The LLM returns `is_music` and `confidence`. Non-music items (talk clips, vlogs, news, podcasts, cartoon episodes) get no guessed tags. Children's songs, TV-show stage/Live performances and livestream song clips count as music.
+
+With `NON_MUSIC_ACTION = "delete"` (default) non-music answered with confidence `high` is moved to the delete folder (below); anything less confident is only listed as `review` and marked `TXXX:PIPELINE_NON_MUSIC` so `--process`/`--organize` skip it. `"skip"` only marks, `"move"` moves to `NON_MUSIC_DIR`.
+
+### Delete folder (nothing is ever removed)
+
+"Delete" means **move to `DELETE_DIR`** (default `BASE_DIR/_to_delete`), keeping the path relative to the scanned folder and never overwriting (a `_<n>` suffix is added). It runs as part of `--process` for:
+
+- non-music with LLM confidence `high`
+- 伴奏 / karaoke-version / off-vocal backing tracks (`deletion.version_reason`; quoted lyrics and "with vocals" markers such as うた入り are ignored)
+- DJ versions (`DJ版`, `DJ某某版`, `DJ0.9降速版`, `(DJ…)`, `DJ抖音`; not artists like "DJ Snake")
+
+Every run writes `logs/delete_candidates_<ts>.csv` (path, reason, confidence, action = moved / review / dry-run); actual moves go to `logs/deleted_<ts>.csv` (src, dest, reason). Use `--no-delete` (or `DELETE_ENABLED = False`) to only write the candidates list; `DELETE_VERSIONS = False` keeps 伴奏/DJ files. All library commands skip `DELETE_DIR`. Undo = move files back using `deleted_<ts>.csv`.
+
+### Conventions
+
+- Covers: artist = the performer; the original singer goes to `TXXX:ORIGINAL_ARTIST` (`WRITE_ORIGINAL_ARTIST`).
+- Original script is kept (no Traditional/Simplified conversion); bilingual titles and artist aliases in brackets (`某某(本名)`) are kept.
+- Soundtrack/Disney: the real singer via MusicBrainz/Spotify/Last.fm (match guard) or the LLM; the movie only when unknown.
+- Playlist/channel folders are only a hint for the artist; files are organized into Artist/Album.
+- Well-tagged files are organized only; their tags are not touched.
+
+### Duplicate artist folders
+
+```bash
+python main.py --build-aliases /srv/music        # propose ARTIST_ALIASES_FILE (JSON {variant: canonical})
+python main.py --merge-artists /srv/music/organized          # dry run: logs/merge_artists_<ts>.csv
+python main.py --merge-artists /srv/music/organized --apply  # retag artist + move to canonical folder
+```
+
+Spellings are grouped by their Chinese name (Traditional/Simplified-insensitive); an English-only name joins only when exactly one Chinese name is seen with it in a bilingual credit. Multi-artist credits and junk ("A - Title", `【】`) are never merged. Canonical = the bilingual form if one exists, else the most used spelling. If the file exists, `--build-aliases` writes `*.proposed.json` instead, so your edits are kept. `--merge-artists` never overwrites: same content at the destination is reported as `dupe-skip`, a different file gets a `_<n>` suffix. `--organize` also applies the map.
 
 ### Evaluating the prompt on your library
 
@@ -172,7 +202,7 @@ Album falls back to the title when no valid album is found. Filenames are never 
 
 ## Library mode
 
-Each flag takes an optional `DIR` (default `MUSIC_DIR`) and works recursively on `*.mp3` files, skipping hidden files. Only **one** command runs per call. If several are given, the first one in this order wins: `--dump-tags`, `--clean-junk`, `--from-filename`, `--needs-tag`, `--fix-art`, `--organize`, `--fix-wrong`, `--process`, `--llm-only`, `--remove-tags`, `--lyrics`, `--fill-missing`, `--reprocess`.
+Each flag takes an optional `DIR` (default `MUSIC_DIR`) and works recursively on `*.mp3` files, skipping hidden files. Only **one** command runs per call. If several are given, the first one in this order wins: `--dump-tags`, `--clean-junk`, `--from-filename`, `--needs-tag`, `--fix-art`, `--organize`, `--fix-wrong`, `--build-aliases`, `--merge-artists`, `--process`, `--llm-only`, `--remove-tags`, `--lyrics`, `--fill-missing`, `--reprocess`.
 
 Commands marked "skips organized" ignore files under `ORGANIZED_DIR`.
 
@@ -191,6 +221,8 @@ Commands marked "skips organized" ignore files under `ORGANIZED_DIR`.
 | `--remove-tags [DIR]` | Strip text ID3 tags but **keep embedded cover art**. |
 | `--lyrics [DIR]` | Add LRCLIB lyrics (USLT) to files that already have title+artist. |
 | `--dump-tags [DIR]` | Write every file's ID3 frames to `logs/dump_tags_<ts>.txt`. |
+| `--build-aliases [DIR]` | Propose a duplicate-artist map, see [Duplicate artist folders](#duplicate-artist-folders). |
+| `--merge-artists [DIR] [--apply]` | Merge duplicate artist spellings (dry run unless `--apply`). Default DIR is `ORGANIZED_DIR`. |
 
 `--fill-missing`, `--reprocess`, `--llm-only`, `--remove-tags`, `--lyrics` and `--dump-tags` use their own `rglob` and **do not** skip `ORGANIZED_DIR`.
 
@@ -201,13 +233,13 @@ python main.py --process /srv/music
 python main.py --process /srv/music --no-fix-art --no-organize   # retag only
 ```
 
-1. **clean junk**: same as `--clean-junk`
-2. **collect**: find files that are not well tagged, or whose tags look wrong (same checks as `--fix-wrong`)
+1. **clean junk**: same as `--clean-junk` (also replaces channel-tab albums like "X - Videos" with the title)
+2. **delete versions + collect**: move 伴奏/DJ versions to `DELETE_DIR` (unless `--no-delete`), then find files that are not well tagged, or whose tags look wrong (same checks as `--fix-wrong`)
 3. **LLM**: retag those files in batches of `LLM_BATCH_SIZE`, then enrich (MusicBrainz, Spotify, Last.fm, …) and update the allowlist (skipped if nothing needs it)
 4. **fix art**: same as `--fix-art` on `DIR` (skip with `--no-fix-art`)
 5. **organize**: same as `--organize` on `DIR`, moving files into `ORGANIZED_DIR` (skip with `--no-organize`)
 
-`--no-fix-art` and `--no-organize` have no effect without `--process`.
+`--no-fix-art`, `--no-organize` and `--no-delete` have no effect without `--process`.
 
 ## Other scripts
 

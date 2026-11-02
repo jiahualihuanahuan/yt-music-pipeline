@@ -32,7 +32,7 @@ from datetime import datetime
 import glob
 from config import (
     STAGING_DIR, PROCESSED_DIR, LOG_DIR, DRY_RUN,
-    LLM_BATCH_SIZE, MUSIC_DIR, ORGANIZED_DIR,
+    LLM_BATCH_SIZE, MUSIC_DIR, ORGANIZED_DIR, BASE_DIR,
 )
 from search_download import main as run_downloads
 from parse_meta import parse_one, apply_llm_batch, finalize_allowlist, parse_all
@@ -268,6 +268,7 @@ def _write_tags(
     lyrics: str = None,
     allow_clear: bool = False,
     genre: str = None,
+    original_artist: str = None,
 ):
     """Write ID3v2.4 tags including embedded cover art (APIC) and release year (TDRC).
     If allow_clear=True, empty strings remove the corresponding text tag instead of writing "Unknown".
@@ -299,6 +300,10 @@ def _write_tags(
 
         if genre and str(genre).strip():
             tags["TCON"] = TCON(encoding=3, text=str(genre).strip())
+
+        import config as _cfgw
+        if original_artist and getattr(_cfgw, "WRITE_ORIGINAL_ARTIST", True) and original_artist.strip() != (artist or "").strip():
+            tags["TXXX:ORIGINAL_ARTIST"] = TXXX(encoding=3, desc="ORIGINAL_ARTIST", text=original_artist.strip())
 
         if featured:
             tags["TXXX:FEATURED"] = TXXX(encoding=3, desc="FEATURED", text=", ".join(featured))
@@ -641,6 +646,7 @@ def _retag_one(meta: dict):
         lyrics=lyrics_text,
         allow_clear=allow_clear,
         genre=meta.get("genre"),
+        original_artist=meta.get("original_artist"),
     )
     album_disp = album or "(cleared)"
     artist_disp = artist or "(cleared)"
@@ -681,6 +687,10 @@ def _handle_non_music(path: Path, meta: dict):
     import config as _cfg
     action = getattr(_cfg, "NON_MUSIC_ACTION", "skip")
     reason = meta.get("llm_notes") or "non-music"
+    if action == "delete" and _DELETE_RUN is not None:
+        conf = str(meta.get("confidence") or "").lower()
+        if _DELETE_RUN.consider(path, f"non-music: {reason}", "high" if conf == "high" else (conf or "low")):
+            return
     try:
         from mutagen.id3 import ID3, TXXX, ID3NoHeaderError
         try:
@@ -1296,13 +1306,29 @@ def _is_under_organized(path: Path) -> bool:
         return False
 
 
+def _is_under_delete_dir(path: Path) -> bool:
+    import config as _cfg
+    d = getattr(_cfg, "DELETE_DIR", None)
+    if not d:
+        return False
+    try:
+        path.resolve().relative_to(Path(d).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+# Active DeleteRun for this pipeline run (set by _retag_folder), else None.
+_DELETE_RUN = None
+
+
 def _list_mp3s(folder: Path) -> list[Path]:
     """List MP3s under folder, skipping the organized library and hidden files."""
     out = []
     for f in folder.rglob("*.mp3"):
         if f.name.startswith("."):
             continue
-        if _is_under_organized(f):
+        if _is_under_organized(f) or _is_under_delete_dir(f):
             continue
         out.append(f)
     out.sort()
@@ -1386,6 +1412,9 @@ def organize_library(folder: Path):
             pass
     print(f"indexed {n_org} existing organized files")
 
+    import config as _cfg
+    import artist_aliases
+    aliases = artist_aliases.load(getattr(_cfg, "ARTIST_ALIASES_FILE", BASE_DIR / "artist_aliases.json"))
     moved = 0
     dupes = 0
     skipped = 0
@@ -1401,6 +1430,10 @@ def organize_library(folder: Path):
         album = tags["album"].strip()
         if _is_invalid_album(album):
             album = title
+        canon = aliases.get(artist)
+        if canon and canon != artist:
+            _set_artist(f, canon)
+            artist = canon
 
         # Fast dedup: same size as something already organized -> confirm with hash
         try:
@@ -1450,6 +1483,91 @@ def organize_library(folder: Path):
     empty_org = _remove_empty_dirs(ORGANIZED_DIR)
     print(f"done: moved={moved} dupes_removed={dupes} skipped={skipped} empty_dirs_removed={empty_src + empty_org}")
 
+
+
+def _set_artist(path: Path, artist: str):
+    """Rewrite TPE1 (and TPE2 when it held the old artist)."""
+    from mutagen.id3 import ID3, TPE1, TPE2
+    t = ID3(path)
+    old = str(t["TPE1"].text[0]) if "TPE1" in t and t["TPE1"].text else ""
+    t.setall("TPE1", [TPE1(encoding=3, text=[artist])])
+    if "TPE2" not in t or not t["TPE2"].text or str(t["TPE2"].text[0]) == old:
+        t.setall("TPE2", [TPE2(encoding=3, text=[artist])])
+    t.save(path)
+
+
+def build_aliases_folder(folder: Path):
+    """Propose {variant: canonical} for duplicate artist spellings under folder."""
+    import config as _cfg
+    from collections import Counter
+    import artist_aliases
+    counts = Counter()
+    for f in sorted(Path(folder).rglob("*.mp3")):
+        if _is_under_delete_dir(f):
+            continue
+        a = (_read_tags(f).get("artist") or "").strip()
+        if a:
+            counts[a] += 1
+    groups = artist_aliases.build(counts)
+    out = Path(getattr(_cfg, "ARTIST_ALIASES_FILE", BASE_DIR / "artist_aliases.json"))
+    if out.exists():
+        out = out.with_suffix(".proposed.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    artist_aliases.save(out, artist_aliases.to_map(groups))
+    for g in groups[:20]:
+        print(f"  {g['files']:5d}  {g['canonical']}  <=  {', '.join(v for v in g['variants'] if v != g['canonical'])}")
+    print(f"{len(groups)} groups; map written to {out} (edit it, then --merge-artists)")
+
+
+def merge_artists_folder(folder: Path, apply: bool = False):
+    """Retag artist to the canonical name and move files to Artist/Album under ORGANIZED_DIR.
+
+    Dry run by default (prints + logs/merge_artists_<ts>.csv). Never overwrites: a
+    same-content file at the destination is a dupe (left in place, reported); a
+    different file gets a _<n> suffix.
+    """
+    import config as _cfg
+    import csv as _csv
+    import artist_aliases
+    aliases = artist_aliases.load(getattr(_cfg, "ARTIST_ALIASES_FILE", BASE_DIR / "artist_aliases.json"))
+    if not aliases:
+        print("no artist alias map; run --build-aliases first")
+        return
+    rows = []
+    for f in sorted(Path(folder).rglob("*.mp3")):
+        if _is_under_delete_dir(f):
+            continue
+        tags = _read_tags(f)
+        old = (tags.get("artist") or "").strip()
+        canon = aliases.get(old)
+        if not canon or canon == old:
+            continue
+        album = (tags.get("album") or "").strip() or (tags.get("title") or f.stem)
+        dest = ORGANIZED_DIR / _safe_name(canon) / _safe_name(album) / f.name
+        action = "move"
+        if dest.exists():
+            if _file_hash(dest) == _file_hash(f):
+                action = "dupe-skip"
+            else:
+                n = 1
+                while dest.exists():
+                    dest = dest.with_name(f"{f.stem}_{n}{f.suffix}")
+                    n += 1
+        rows.append({"src": str(f), "old_artist": old, "artist": canon, "dest": str(dest), "action": action})
+        if apply:
+            _set_artist(f, canon)
+            if action == "move":
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(f), str(dest))
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log = LOG_DIR / f"merge_artists_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    with log.open("w", newline="", encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=["src", "old_artist", "artist", "dest", "action"])
+        w.writeheader()
+        w.writerows(rows)
+    if apply:
+        _remove_empty_dirs(Path(folder))
+    print(f"merge-artists: {len(rows)} files {'changed' if apply else 'would change (dry run, add --apply)'}; log {log}")
 
 
 def _tags_look_wrong(path: Path, tags: dict) -> list[str]:
@@ -1584,7 +1702,7 @@ def fix_wrong_folder(folder: Path):
 
 
 
-def process_folder(folder: Path, fix_art: bool = True, organize: bool = True):
+def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, delete: bool | None = None):
     """One-pass for a mixed library.
 
     1. Strip YouTube junk tags
@@ -1599,7 +1717,7 @@ def process_folder(folder: Path, fix_art: bool = True, organize: bool = True):
         print(f"not a directory: {folder}")
         return
 
-    _retag_folder(folder)
+    _retag_folder(folder, delete=delete)
 
     if fix_art:
         print("\n--- step 4: fix art ---")
@@ -1609,13 +1727,44 @@ def process_folder(folder: Path, fix_art: bool = True, organize: bool = True):
         organize_library(folder)
 
 
-def _retag_folder(folder: Path):
-    """Steps 1-3 of process_folder (tag cleanup + LLM on missing/wrong)."""
+def _retag_folder(folder: Path, delete: bool | None = None):
+    """Steps 1-3 of process_folder (tag cleanup + LLM on missing/wrong).
+
+    delete: move unwanted files (non-music high confidence, 伴奏, DJ) to DELETE_DIR.
+    None = config DELETE_ENABLED. False = only write the candidates list.
+    """
+    global _DELETE_RUN
     folder = folder.resolve()
     if not folder.is_dir():
         print(f"not a directory: {folder}")
         return
+    import config as _cfg
+    from deletion import DeleteRun
+    enabled = getattr(_cfg, "DELETE_ENABLED", True) if delete is None else delete
+    _DELETE_RUN = DeleteRun(folder, Path(getattr(_cfg, "DELETE_DIR", BASE_DIR / "_to_delete")), LOG_DIR, enabled)
+    try:
+        _retag_folder_inner(folder)
+    finally:
+        _DELETE_RUN.write_logs()
+        _DELETE_RUN = None
 
+
+def _version_candidates(files: list[Path]) -> list[Path]:
+    """Send 伴奏/karaoke and DJ versions to the delete run; return the files that remain."""
+    import config as _cfg
+    from deletion import version_reason
+    if _DELETE_RUN is None or not getattr(_cfg, "DELETE_VERSIONS", True):
+        return files
+    keep = []
+    for f in files:
+        why = version_reason(f.stem, _read_tags(f).get("title") or "")
+        if why and _DELETE_RUN.consider(f, why, "high"):
+            continue
+        keep.append(f)
+    return keep
+
+
+def _retag_folder_inner(folder: Path):
     print(f"process: {folder} (skipping organized/)")
 
     print("\n--- step 1: clean junk ---")
@@ -1623,8 +1772,8 @@ def _retag_folder(folder: Path):
 
     # Filename regex (from_filename_folder) is no longer run here: it wrote
     # confident wrong tags that then skipped the LLM. See tests/eval_regex.py.
-    print("\n--- step 2: collect missing + wrong ---")
-    all_mp3s = _list_mp3s(folder)
+    print("\n--- step 2: collect missing + wrong (伴奏/DJ versions -> delete dir) ---")
+    all_mp3s = _version_candidates(_list_mp3s(folder))
     need = []
     for f in all_mp3s:
         if _is_marked_non_music(f):
@@ -1777,6 +1926,13 @@ def main():
                     help="one-pass for mixed folders: clean junk, LLM on missing+wrong tags, then fix-art and organize")
     ap.add_argument("--no-fix-art", action="store_true", help="with --process: skip the fix-art step")
     ap.add_argument("--no-organize", action="store_true", help="with --process: skip the organize step")
+    ap.add_argument("--no-delete", action="store_true",
+                    help="with --process: do not move non-music/伴奏/DJ files to DELETE_DIR (still writes the candidates list)")
+    ap.add_argument("--build-aliases", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help="propose a duplicate-artist map from tags under DIR and write ARTIST_ALIASES_FILE (if absent; else *.proposed.json)")
+    ap.add_argument("--merge-artists", nargs="?", const=str(ORGANIZED_DIR), type=str, metavar="DIR",
+                    help="apply ARTIST_ALIASES_FILE: retag artist and move files to the canonical folder (dry run unless --apply)")
+    ap.add_argument("--apply", action="store_true", help="with --merge-artists: actually retag and move")
     ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
@@ -1813,8 +1969,15 @@ def main():
     if args.fix_wrong:
         fix_wrong_folder(Path(args.fix_wrong))
         return
+    if args.build_aliases:
+        build_aliases_folder(Path(args.build_aliases))
+        return
+    if args.merge_artists:
+        merge_artists_folder(Path(args.merge_artists), apply=args.apply)
+        return
     if args.process:
-        process_folder(Path(args.process), fix_art=not args.no_fix_art, organize=not args.no_organize)
+        process_folder(Path(args.process), fix_art=not args.no_fix_art, organize=not args.no_organize,
+                       delete=False if args.no_delete else None)
         return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))

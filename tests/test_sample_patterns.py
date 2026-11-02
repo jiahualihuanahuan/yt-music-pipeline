@@ -25,7 +25,7 @@ class TitleRules(unittest.TestCase):
 
     def test_lyric_channel(self):
         self.assertEqual(self.p("张三 - 夜空『想把星星都摘給你，我的夜空只有你。』【動態歌詞Lyrics】"), ("张三", "夜空"))
-        self.assertEqual(self.p("張三（Zhang San） - 夜空『歌詞』【動態歌詞⧸Pinyin Lyrics】♫"), ("張三", "夜空"))
+        self.assertEqual(self.p("張三（Zhang San） - 夜空『歌詞』【動態歌詞⧸Pinyin Lyrics】♫"), ("張三(Zhang San)", "夜空"))  # alias kept (Jenny: keep)
 
     def test_lyric_channel_multi_artist_and_hyphen_name(self):
         r = tr.parse("王五⧸赵六 - 心事『一句歌詞』【動態歌詞Lyrics】")

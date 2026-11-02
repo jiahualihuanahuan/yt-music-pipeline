@@ -237,7 +237,24 @@ USE_TITLE_RULES = True
 
 # What to do with items the LLM flags as not music (talk clips, vlogs, news,
 # podcasts, cartoons): "skip" = mark and leave in place, "move" = move to NON_MUSIC_DIR.
-NON_MUSIC_ACTION = "skip"
+NON_MUSIC_ACTION = "delete"
+# "delete" never removes anything: files are MOVED into DELETE_DIR (relative path kept,
+# no overwrite) and logged to logs/deleted_<ts>.csv. Only LLM is_music=false with
+# confidence "high" is moved; lower confidence goes to logs/delete_candidates_<ts>.csv
+# as "review". 伴奏/karaoke and DJ versions are moved too (DELETE_VERSIONS).
+# --process runs this by default; pass --no-delete (or DELETE_ENABLED=False) to only
+# write the candidates list.
+DELETE_ENABLED = True
+DELETE_DIR = BASE_DIR / "_to_delete"
+DELETE_VERSIONS = True
+
+# Covers: also store the original singer in TXXX:ORIGINAL_ARTIST (artist stays the performer).
+WRITE_ORIGINAL_ARTIST = True
+
+# Duplicate artist spellings -> one canonical name ({"Jay Chou": "周杰倫 Jay Chou"}).
+# Build a proposal with --build-aliases DIR, edit it, then --merge-artists DIR [--apply].
+# organize also applies it. Missing file = no merging.
+ARTIST_ALIASES_FILE = BASE_DIR / "artist_aliases.json"
 
 # Covers: "performer" = artist tag is who sings on the file (the original singer is
 # noted, not tagged); "original" = keep the original singer as artist.

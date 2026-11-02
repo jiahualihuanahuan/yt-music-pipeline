@@ -17,5 +17,8 @@ MB_CONTACT = "you@example.com"   # MusicBrainz asks for a contact in the User-Ag
 # LLM_MODEL = "Qwen/Qwen3-8B-AWQ"
 # USE_REGEX_PARSER = False
 # USE_TITLE_RULES = True        # high-precision pre-filter; False = everything to the LLM
-# NON_MUSIC_ACTION = "skip"     # or "move" to send talk/vlog/news clips to NON_MUSIC_DIR
+# NON_MUSIC_ACTION = "delete"   # "skip" | "move" | "delete" (= move to DELETE_DIR)
+# DELETE_ENABLED = True
+# DELETE_DIR = Path("/mnt/data/docker/navidrome/_to_delete")
+# ARTIST_ALIASES_FILE = Path("/mnt/data/docker/navidrome/artist_aliases.json")
 # NON_MUSIC_DIR = Path("/mnt/data/docker/navidrome/non_music")

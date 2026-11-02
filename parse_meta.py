@@ -37,6 +37,12 @@ Decide for every item:
    vlogs, travel videos, news, podcasts, sports, school promo videos, cartoon episodes,
    "NA". For non-music return title=null, artist=null, album=null, is_music=false and a
    short reason in "notes". Never invent a song for it.
+   Songs ARE music: children's songs / nursery rhymes, TV-show stage performances (纯享,
+   Live), songs sung in a livestream (直播歌切), covers. Use confidence "high" for
+   is_music=false only when it is clearly not a song (non-music files get removed).
+   Soundtrack / Disney songs: artist = the real singer if you know it; only if unknown,
+   use the movie/show as artist. Keep bilingual titles and artist aliases as written,
+   e.g. "枕上書 Writings On Pillow", "某某(本名)".
 2. title: the song name only. Remove: 『lyric lines』, 【動態歌詞/Pinyin/Vietsub/Lyrics】,
    (Official Video/Audio/MV), [High Quality], HD, 4K, (English), (with lyrics), Sing-A-Long,
    完整版, [11-char video id], "(From <movie>)" and the clickbait sentence around a
