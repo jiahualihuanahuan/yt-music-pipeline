@@ -17,7 +17,8 @@ Usage:
   python main.py --fix-art [DIR]              # embed good cover art (local or fetch)
   python main.py --organize [DIR]             # move well-tagged files to organized/Artist/Album/
   python main.py --fix-wrong [DIR]            # retag files whose tags disagree with the filename
-  python main.py --process [DIR]              # one-pass for mixed folders (recommended)
+  python main.py --process [DIR]              # one-pass: clean, retag, fix-art, organize (recommended)
+  python main.py --process [DIR] --no-fix-art --no-organize  # retag only
 """
 import argparse
 import json
@@ -1403,15 +1404,34 @@ def fix_wrong_folder(folder: Path):
 
 
 
-def process_folder(folder: Path):
+def process_folder(folder: Path, fix_art: bool = True, organize: bool = True):
     """One-pass for a mixed library.
 
     1. Strip YouTube junk tags
     2. Apply safe filename artist/title where it matches
     3. LLM-retag only files that are missing tags or look wrong
     4. Leave well-tagged files alone
+    5. Embed cover art (fix_art_folder), unless fix_art=False
+    6. Move well-tagged files into ORGANIZED_DIR (organize_library), unless organize=False
     Skips the organized/ folder.
     """
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+
+    _retag_folder(folder)
+
+    if fix_art:
+        print("\n--- step 5: fix art ---")
+        fix_art_folder(folder)
+    if organize:
+        print("\n--- step 6: organize ---")
+        organize_library(folder)
+
+
+def _retag_folder(folder: Path):
+    """Steps 1-4 of process_folder (tag cleanup + LLM on missing/wrong)."""
     folder = folder.resolve()
     if not folder.is_dir():
         print(f"not a directory: {folder}")
@@ -1478,8 +1498,7 @@ def process_folder(folder: Path):
 
     flush()
     finalize_allowlist(results)
-    print(f"\ndone: processed {len(results)} files")
-    print("next: python main.py --fix-art   then   python main.py --organize")
+    print(f"\ndone: retagged {len(results)} files")
 
 
 def dump_tags_folder(folder: Path):
@@ -1570,7 +1589,9 @@ def main():
     ap.add_argument("--fix-wrong", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help="retag files whose tags disagree with the filename or look noisy")
     ap.add_argument("--process", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
-                    help="one-pass for mixed folders: clean junk, from-filename, LLM only missing+wrong")
+                    help="one-pass for mixed folders: clean junk, from-filename, LLM only missing+wrong, then fix-art and organize")
+    ap.add_argument("--no-fix-art", action="store_true", help="with --process: skip the fix-art step")
+    ap.add_argument("--no-organize", action="store_true", help="with --process: skip the organize step")
     ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",
                 help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
@@ -1608,7 +1629,7 @@ def main():
         fix_wrong_folder(Path(args.fix_wrong))
         return
     if args.process:
-        process_folder(Path(args.process))
+        process_folder(Path(args.process), fix_art=not args.no_fix_art, organize=not args.no_organize)
         return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))
