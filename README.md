@@ -5,13 +5,14 @@ Builds and maintains a local MP3 library from YouTube. It has two jobs:
 1. **Download mode** (`python main.py`): searches YouTube with keyword and artist queries (or one URL), downloads MP3s with `yt-dlp`, works out title, artist and album with regex plus an optional local LLM, enriches and dedupes them, and files them under `processed/Artist/Album/`.
 2. **Library mode** (`python main.py --process DIR`, `--fix-art`, `--organize`, …): cleans up the tags of an existing MP3 folder in place, and can move well-tagged files into `ORGANIZED_DIR`.
 
-There is no test suite. Everything lives in flat Python modules and is set up in `config.py`.
+Tests: `python -m unittest discover -s tests -t .` (mocked HTTP, no network). Everything lives in flat Python modules and is set up in `config.py`.
 
 ## Requirements
 
 - Python 3.10+ (the code uses `X | None` type hints)
 - Python packages from `requirements.txt`: `yt-dlp`, `requests`, `rapidfuzz`, `Pillow`, `musicbrainzngs`, `openai`, `mutagen`
   (`musicbrainzngs` and `openai` are listed but never imported. The code calls the HTTP APIs directly with `requests`.)
+- Optional: a Last.fm API key and Spotify client ID/secret (see [Metadata sources](#metadata-sources))
 - **ffmpeg** on `PATH`, which `yt-dlp --extract-audio` needs for MP3 conversion and thumbnails (download mode only)
 - **Deno**, used by yt-dlp as its JavaScript runtime for YouTube. Install it with `bash setup_deno.sh`
 - Optional: an OpenAI-compatible LLM endpoint (for example vLLM) and a SearXNG instance (see [LLM](#llm))
@@ -28,13 +29,16 @@ python main.py --dry-run           # print search queries without downloading
 All settings live in `config.py`. To change them, create **`config_local.py`** (gitignored) and redefine any variable. It is imported at the end of `config.py`, and the paths derived from `BASE_DIR` are recomputed afterwards.
 
 ```python
-# config_local.py
+# config_local.py  (start from: cp config_local.example.py config_local.py)
 from pathlib import Path
 BASE_DIR = Path("/data/yt-music")                 # working data root
 MUSIC_DIR = Path("/srv/music")                     # default DIR for library-mode flags
 ORGANIZED_DIR = Path("/srv/music-organized")       # target of --organize / --process
 LLM_BASE_URL = "http://localhost:8001/v1"
 LLM_MODEL = "Qwen/Qwen3-8B-AWQ"
+LASTFM_API_KEY = "..."
+SPOTIFY_CLIENT_ID = "..."
+SPOTIFY_CLIENT_SECRET = "..."
 BROWSER_COOKIES = "firefox"                        # or None to disable the fallback
 ```
 
@@ -63,9 +67,36 @@ Note: `MUSIC_DIR` and `ORGANIZED_DIR` are hard-coded Linux/Navidrome paths and a
 
 ### Other settings
 
-`DEDUP_THRESHOLD=85` (rapidfuzz), the `LLM_*` and `SEARXNG_*` settings (below), `USER_AGENT`, `MB_CONTACT`, and `DRY_RUN`.
+`USE_REGEX_PARSER=False` (see [Parsing](#parsing)), `DEDUP_THRESHOLD=85` (rapidfuzz), the `LLM_*` and `SEARXNG_*` settings (below), `USER_AGENT`, `MB_CONTACT`, and `DRY_RUN`.
 
-`LASTFM_API_KEY`, `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` and `DISCOGS_TOKEN` are defined but **not used anywhere** in the code.
+`LASTFM_API_KEY`, `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` default to empty strings and should be set in `config_local.py`. `DISCOGS_TOKEN` is unused.
+
+## Metadata sources
+
+`musicbrainz.enrich()` fills canonical artist, album, year, genre and a cover URL. Later sources only fill fields that are still empty:
+
+1. **Local MusicBrainz cache** (SQLite, filled by `mb_cache_builder.py` and live lookups)
+2. **Live MusicBrainz** API (artist search + releases, 1.1 s between calls). No key needed. Set `MB_CONTACT`.
+3. **Spotify** Web API, client-credentials token (cached until expiry): track search, then album name (not compilations), release year, the largest album image, and artist genres
+4. **Last.fm** `track.getInfo` (≤4 req/s): album, album image, and top tags as the genre (junk tags like "seen live" are dropped)
+5. **iTunes**, then **Deezer**, only if the album is still missing
+
+A source is skipped silently when its key is empty. On an HTTP or network error it logs one line and moves on. Spotify and Last.fm results are cached in memory per (title, artist) for the run.
+
+Genre is written to the ID3 `TCON` tag. During download-mode organize, the Spotify/Last.fm cover is preferred over the YouTube thumbnail. `--fix-art` fetches covers in this order: Spotify, iTunes, Deezer, Last.fm.
+
+## Parsing
+
+Regex title parsing is **off by default** (`USE_REGEX_PARSER = False`): every file's name goes to the LLM. `--process` no longer runs the filename-regex step. `--from-filename` still exists as a standalone command but isn't recommended.
+
+On 56 realistic YouTube titles (`python tests/eval_regex.py`):
+
+| Parser | correct | wrong | abstain |
+|---|---|---|---|
+| `--from-filename` (`Artist - Title` split) | 7 | 17 | 32 |
+| `parse_title` (download mode) | 25 | 22 | 9 |
+
+All 17 wrong `--from-filename` results looked well-tagged afterwards, so `--process` never sent them to the LLM.
 
 ## LLM
 
@@ -95,12 +126,10 @@ What a full run does:
 
 1. **Search & download** (`search_download.py`): runs each weighted keyword query, then each artist query (`"<name> 歌曲 official"` for cn and `"<name> official audio"` otherwise), then up to 15 random artists from the allowlist. yt-dlp extracts MP3 320 audio plus a JPG thumbnail into `staging/`, using the download archive, the duration filter, Deno, and `cookies.txt` (or `--cookies-from-browser`).
 2. **Parallel watcher** (`main.py`): while downloads run, a thread picks up finished MP3s in `staging/`:
-   - regex parse (`regex_parser.py`): splits feat/ft/with/cover markers and checks against the allowlist and the local SQLite DB
-   - album lookup first when title and artist are known
-   - files flagged `needs_llm` are batched (`LLM_BATCH_SIZE`) to the LLM
-   - enrichment (`musicbrainz.py`: MusicBrainz, then iTunes/Deezer fallback, canonical artist names)
+   - every file is batched (`LLM_BATCH_SIZE`) to the LLM (with `USE_REGEX_PARSER=True`, regex runs first and only files it flags go to the LLM)
+   - enrichment (see [Metadata sources](#metadata-sources))
    - incremental fuzzy dedup (`dedup.py`, title+artist `token_sort_ratio >= 85`, keeps the higher-confidence item)
-   - organize: move to `processed/<Artist>/<Album>/<original filename>.mp3`, write a 1:1 600×600 `cover.jpg` with an 8px dark border, fetch lyrics from LRCLIB, write ID3v2.4 tags (cover, lyrics, year), and add a `.json` sidecar with the raw title and parsed fields
+   - organize: move to `processed/<Artist>/<Album>/<original filename>.mp3`, write a 1:1 600×600 `cover.jpg` with an 8px dark border, fetch lyrics from LRCLIB, write ID3v2.4 tags (cover, lyrics, year, genre), and add a `.json` sidecar with the raw title and parsed fields
    - afterwards it updates the allowlist and deletes orphaned staging sidecars
 3. A summary (`organized`, `high_confidence`, `llm_used`) is printed and saved to `logs/run_<timestamp>.json`.
 
@@ -118,12 +147,12 @@ Commands marked "skips organized" ignore files under `ORGANIZED_DIR`.
 |---|---|
 | `--process [DIR]` | One-pass cleanup, see below. Recommended. |
 | `--clean-junk [DIR]` | Strip YouTube junk `TXXX` frames and useless genres. Keeps cover, title, artist, album, lyrics, MusicBrainz. Skips organized. |
-| `--from-filename [DIR]` | Set artist/title from `Artist - Title.mp3` filenames (album falls back to title). Skips organized. |
+| `--from-filename [DIR]` | (Regex; unreliable, see [Parsing](#parsing).) Set artist/title from `Artist - Title.mp3` filenames (album falls back to title). Skips organized. |
 | `--needs-tag [DIR]` | Report files missing a valid title/artist/album to `logs/needs_tag_<ts>.txt`. Skips organized. |
 | `--fix-wrong [DIR]` | LLM-retag files whose tags disagree with the filename, or have a bad album or channel-like artist. Skips organized. |
-| `--fix-art [DIR]` | Make sure each MP3 has good embedded art: keep an existing APIC (≥8 KB and ≥200×200), else use a nearby `cover.jpg`/`folder.jpg`/`<name>.jpg`/largest `*.jpg`, else fetch from iTunes, then Deezer (needs title+artist). Art is cropped to 600×600 with a border. Skips organized. |
+| `--fix-art [DIR]` | Make sure each MP3 has good embedded art: keep an existing APIC (≥8 KB and ≥200×200), else use a nearby `cover.jpg`/`folder.jpg`/`<name>.jpg`/largest `*.jpg`, else fetch from Spotify, iTunes, Deezer, then Last.fm (needs title+artist). Art is cropped to 600×600 with a border. Skips organized. |
 | `--organize [DIR]` | Move well-tagged files (valid title, artist, album) to `ORGANIZED_DIR/<Artist>/<Album>/<filename>`. **Deletes** exact duplicates (same size + MD5) of files already organized. Adds `_<size>` to the name if one exists. Removes empty directories in `DIR` and `ORGANIZED_DIR`. Badly tagged files are left in place. |
-| `--fill-missing [DIR]` | Retag (regex/enrich/LLM) only files missing a valid title/artist/album. Files with a MusicBrainz ID and valid artist/title are skipped. |
+| `--fill-missing [DIR]` | Retag (LLM + enrichment) only files missing a valid title/artist/album. Files with a MusicBrainz ID and valid artist/title are skipped. |
 | `--reprocess [DIR]` | Re-parse and retag every MP3 in place. |
 | `--llm-only [DIR]` | Send every filename to the LLM (no regex) and overwrite tags in place. |
 | `--remove-tags [DIR]` | Strip text ID3 tags but **keep embedded cover art**. |
@@ -140,11 +169,10 @@ python main.py --process /srv/music --no-fix-art --no-organize   # retag only
 ```
 
 1. **clean junk**: same as `--clean-junk`
-2. **from filename**: same as `--from-filename`
-3. **collect**: find files that are not well tagged, or whose tags look wrong (same checks as `--fix-wrong`)
-4. **LLM**: retag those files in batches of `LLM_BATCH_SIZE` and update the allowlist (skipped if nothing needs it)
-5. **fix art**: same as `--fix-art` on `DIR` (skip with `--no-fix-art`)
-6. **organize**: same as `--organize` on `DIR`, moving files into `ORGANIZED_DIR` (skip with `--no-organize`)
+2. **collect**: find files that are not well tagged, or whose tags look wrong (same checks as `--fix-wrong`)
+3. **LLM**: retag those files in batches of `LLM_BATCH_SIZE`, then enrich (MusicBrainz, Spotify, Last.fm, …) and update the allowlist (skipped if nothing needs it)
+4. **fix art**: same as `--fix-art` on `DIR` (skip with `--no-fix-art`)
+5. **organize**: same as `--organize` on `DIR`, moving files into `ORGANIZED_DIR` (skip with `--no-organize`)
 
 `--no-fix-art` and `--no-organize` have no effect without `--process`.
 
@@ -180,6 +208,6 @@ ORGANIZED_DIR/Artist/Album/    library-mode output from --organize / --process
 
 ## Known gaps
 
-- `musicbrainz.py` defines `MB_API`, `ITUNES_API` and `DEEZER_API` as Markdown link strings (`"[https://…](https://…)"`), so live MusicBrainz/iTunes/Deezer enrichment requests in that module fail. Cover fetching (`artwork.py`) and `mb_cache_builder.py` use correct URLs.
-- `config.py` ships real-looking Last.fm/Spotify keys that aren't used. Consider removing them.
-- There are no tests.
+- Older commits of `config.py` contain Last.fm/Spotify keys. Rotate them.
+- Spotify artist genres are often empty for newer apps or less-known artists. Last.fm tags then supply the genre.
+- Tests cover the metadata sources, config overrides and the regex switch, not the full pipeline.
