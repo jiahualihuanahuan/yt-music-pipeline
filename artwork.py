@@ -22,10 +22,14 @@ def process_cover(src: Path, dst: Path):
 
 
 def fetch_cover_url(title: str, artist: str) -> str | None:
-    """Return a high-res cover URL from iTunes (preferred) or Deezer."""
+    """Return a cover URL: Spotify, then iTunes, then Deezer, then Last.fm."""
     if not title or not artist:
         return None
     import requests
+    from metadata_sources import spotify_lookup, lastfm_lookup
+    sp = spotify_lookup(title, artist)
+    if sp and sp.get("cover_url"):
+        return sp["cover_url"]
     q = f"{artist} {title}"
     # iTunes
     try:
@@ -53,9 +57,14 @@ def fetch_cover_url(title: str, artist: str) -> str | None:
             data = r.json().get("data") or []
             if data:
                 alb = data[0].get("album") or {}
-                return alb.get("cover_xl") or alb.get("cover_big") or alb.get("cover_medium")
+                url = alb.get("cover_xl") or alb.get("cover_big") or alb.get("cover_medium")
+                if url:
+                    return url
     except Exception:
         pass
+    lf = lastfm_lookup(title, artist)
+    if lf and lf.get("cover_url"):
+        return lf["cover_url"]
     return None
 
 

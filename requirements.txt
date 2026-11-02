@@ -5,3 +5,4 @@ Pillow>=10.0
 musicbrainzngs>=0.7
 openai>=1.0
 mutagen>=1.47
+opencc-python-reimplemented>=0.1.7  # optional: Traditional/Simplified folding in match_guard

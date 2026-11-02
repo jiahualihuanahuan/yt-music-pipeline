@@ -51,6 +51,9 @@ MUSIC_DIR = Path("/mnt/data/docker/navidrome/music")
 # Override with ORGANIZED_DIR in config_local.py if needed.
 ORGANIZED_DIR = Path("/mnt/data/docker/navidrome/organized")
 
+# Where non-music items go when NON_MUSIC_ACTION = "move" (see Parsing below).
+NON_MUSIC_DIR = Path("/mnt/data/docker/navidrome/non_music")
+
 # ---------- Download ----------
 AUDIO_FORMAT = "mp3"
 AUDIO_QUALITY = "320"          # VBR ~320k
@@ -220,6 +223,43 @@ ARTIST_QUERIES = [
     ("Rosalía", "la", 8), ("C. Tangana", "la", 7),
 ]
 
+# ---------- Parsing ----------
+# Regex title parsing was evaluated (tests/eval_regex.py) and produced too many
+# confident wrong tags, so by default every file goes straight to the LLM.
+# Set True to restore the old regex-first behaviour.
+USE_REGEX_PARSER = False
+
+# High-precision rules (title_rules.py) for a few unambiguous title shapes
+# (lyric-channel "Artist - Title『lyric』【…】", "【Performer】… Cover：Original",
+# "Artist《Title》Official MV", "Artist - Title (Official Video)"). They abstain on
+# everything else, which then goes to the LLM. 98% precision on the sample library.
+USE_TITLE_RULES = True
+
+# What to do with items the LLM flags as not music (talk clips, vlogs, news,
+# podcasts, cartoons): "skip" = mark and leave in place, "move" = move to NON_MUSIC_DIR.
+NON_MUSIC_ACTION = "delete"
+# "delete" never removes anything: files are MOVED into DELETE_DIR (relative path kept,
+# no overwrite) and logged to logs/deleted_<ts>.csv. Only LLM is_music=false with
+# confidence "high" is moved; lower confidence goes to logs/delete_candidates_<ts>.csv
+# as "review". 伴奏/karaoke and DJ versions are moved too (DELETE_VERSIONS).
+# --process runs this by default; pass --no-delete (or DELETE_ENABLED=False) to only
+# write the candidates list.
+DELETE_ENABLED = True
+DELETE_DIR = BASE_DIR / "_to_delete"
+DELETE_VERSIONS = True
+
+# Covers: also store the original singer in TXXX:ORIGINAL_ARTIST (artist stays the performer).
+WRITE_ORIGINAL_ARTIST = True
+
+# Duplicate artist spellings -> one canonical name ({"Jay Chou": "周杰倫 Jay Chou"}).
+# Build a proposal with --build-aliases DIR, edit it, then --merge-artists DIR [--apply].
+# organize also applies it. Missing file = no merging.
+ARTIST_ALIASES_FILE = BASE_DIR / "artist_aliases.json"
+
+# Covers: "performer" = artist tag is who sings on the file (the original singer is
+# noted, not tagged); "original" = keep the original singer as artist.
+COVER_ARTIST = "performer"
+
 # ---------- Dedup ----------
 DEDUP_THRESHOLD = 85  # rapidfuzz score on "title + artist"; >= this = duplicate
 
@@ -241,10 +281,10 @@ SEARXNG_BASE_URL = "http://192.168.86.35:8099"
 SEARXNG_MAX_RESULTS = 5
 
 # ---------- API keys (optional) ----------
-LASTFM_API_KEY = "f205c5985189bf0a5bbac030e4dda140"
-SPOTIFY_CLIENT_ID = "2f59486b34844ea39f47fba56870c236"
-SPOTIFY_CLIENT_SECRET = "24f60614bf0344fd8f119ba0e2e99630"
-DISCOGS_TOKEN = ""
+LASTFM_API_KEY = ""          # set in config_local.py (https://www.last.fm/api/account/create)
+SPOTIFY_CLIENT_ID = ""       # set in config_local.py (developer.spotify.com dashboard)
+SPOTIFY_CLIENT_SECRET = ""
+DISCOGS_TOKEN = ""           # currently unused
 
 # ---------- Misc ----------
 USER_AGENT = "music-pipeline/1.0 (personal; contact via GitHub)"

@@ -17,30 +17,91 @@ from config import (
     SEARXNG_BASE_URL, SEARXNG_MAX_RESULTS,
 )
 from regex_parser import parse_title
+from title_rules import clean_raw
 from local_db import connect, lookup_artist, normalize
 
-SYSTEM_PROMPT = """You are a music metadata expert. Given a JSON array of items, decide the correct tags.
+SYSTEM_PROMPT = """You are a music metadata expert tagging a personal library ripped from YouTube.
+Input: a JSON array of items. Each item may have:
+- "id": integer, echo it back unchanged
+- "raw": the YouTube video title / filename (main signal)
+- "channel": uploader channel (a HINT, usually NOT the artist)
+- "folder": the folder the file sits in, often a YouTube playlist name such as
+  "Mix - <artist>", "Top Songs - <artist>", "Uploads from <artist> - Topic",
+  "Ultimate Disney Playlist". The folder is NOT the album.
+- "existing_title", "existing_artist", "existing_album": current tags. Often wrong:
+  they may hold the uploader, the movie name, lyric lines, or the ORIGINAL singer of a cover.
+- "web_search": optional web snippets, only on a second pass.
 
-Each item may contain:
-- "id": integer you must echo back
-- "raw": YouTube video title / filename (primary signal)
-- "channel": optional uploader/channel hint
-- "existing_title", "existing_artist", "existing_album": current ID3 tags (may be wrong)
-- "web_search": optional short list of web snippets (title + content). Present ONLY when a previous pass was unsure. Use them to fill fields you would otherwise leave null.
+Decide for every item:
+1. is_music: false for anything that is not a song: talk / interview / livestream clips,
+   vlogs, travel videos, news, podcasts, sports, school promo videos, cartoon episodes,
+   "NA". For non-music return title=null, artist=null, album=null, is_music=false and a
+   short reason in "notes". Never invent a song for it.
+   Songs ARE music: children's songs / nursery rhymes, TV-show stage performances (纯享,
+   Live), covers. Livestream clips are NOT music, even when a song is sung (直播歌切,
+   直播唱, 歌回, live stream): is_music=false, notes "livestream". Use confidence "high" for
+   is_music=false only when it is clearly not a song (non-music files get removed).
+   Soundtrack / Disney songs: artist = the real singer if you know it; only if unknown,
+   use the movie/show as artist. Keep bilingual titles and artist aliases as written,
+   e.g. "枕上書 Writings On Pillow", "某某(本名)".
+2. title: the song name only. Remove: 『lyric lines』, 【動態歌詞/Pinyin/Vietsub/Lyrics】,
+   (Official Video/Audio/MV), [High Quality], HD, 4K, (English), (with lyrics), Sing-A-Long,
+   完整版, [11-char video id], "(From <movie>)" and the clickbait sentence around a
+   《》 or 【】 song name. Keep version words that matter: (Live), (Remix), (伴奏) -> keep
+   "伴奏" as " (伴奏)" at the end of the title.
+3. artist: the PERFORMER heard on the recording.
+   - Not the uploader/channel (VEVO, "<Name> - Topic", fan channels like "Holy007",
+     "DisneyMusicVEVO", lyric channels), not a movie/show name ("Aladdin", "Pocahontas",
+     "Frozen"). For a soundtrack song where the singer is not in the raw text, give the
+     credited singer only if you are sure; otherwise null.
+   - Covers ("Cover：X", "原唱：X", "翻自：X", "翻唱"): artist = the cover performer
+     (often the 【name】 at the start or the channel), original_artist = X.
+   - Several artists split by "/", "⧸", "、", ",", "&", "feat.": first one in "artist",
+     the rest in "featured".
+   - Hyphenated names are one artist: "A-Lin", "Li-2c", "G-Dragon".
+4. Keep the original language and script exactly as written in raw. Do NOT translate
+   and do NOT convert Traditional <-> Simplified Chinese. A Chinese song keeps its Chinese
+   title even if an English translation is also present in raw.
+5. album: only if you know the real album; else null (the pipeline uses the title).
+6. confidence: "high" (raw states it unambiguously), "medium" (you know the song), "low".
+   Return null for any field you are not confident about rather than guessing.
 
-Rules:
-- Only fill a field if you are confident it is correct.
-- If you are not confident, or the existing value is clearly wrong / nonsense / emoji / generic, return null for that field so it can be cleared.
-- Prefer correcting or clearing bad existing tags over guessing.
-- "title" and "artist" are nullable: return null if truly unknown. Do not invent.
-- Chinese titles: part AFTER dash/colon is often the artist and BEFORE is the title, OR Artist《Title》. Use knowledge + channel hint.
-- Hyphenated names like "A-Lin", "G-Dragon", "j-hope", "(G)I-DLE" are ONE artist.
-- Multiple artists (feat/ft/with/翻唱/cover/原唱/&/、): primary in "artist", others in "featured" (array). Empty array if none.
-- Strip noise: "Official Music Video", "MV", "完整版", "歌词版", "Lyrics", "4K", "HD".
-- "album" is nullable: return null if unsure. The pipeline will fall back to the song title. Never return emoji, "music", "unknown", etc.
-- Keep the exact "id".
-- Respond with ONLY a valid JSON array, no markdown, no commentary:
-  [{"id": 0, "title": "..." or null, "artist": "..." or null, "featured": [], "album": "..." or null, "notes": "..." or null}]
+Examples
+raw "张三 - 夜空『想把星星都摘給你 我的夜空只有你』【動態歌詞Lyrics】" folder "Mix - 李四"
+-> {"title":"夜空","artist":"张三","featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"high","notes":null}
+raw "王五⧸赵六 - 心事『...』【動態歌詞Lyrics】"
+-> {"title":"心事","artist":"王五","featured":["赵六"],"original_artist":null,"album":null,"is_music":true,"confidence":"high","notes":null}
+raw "【小明】煙嗓翻唱【晴天】Cover：周杰倫" channel "小明"
+-> {"title":"晴天","artist":"小明","featured":[],"original_artist":"周杰倫","album":null,"is_music":true,"confidence":"high","notes":"cover"}
+raw "反差萌小姐姐翻唱《手心的蔷薇》" folder "小明的翻唱" channel "小明"
+-> {"title":"手心的蔷薇","artist":"小明","featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"medium","notes":"cover"}
+raw "周深《大鱼》Official Audio"
+-> {"title":"大鱼","artist":"周深","featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"high","notes":null}
+raw "Idina Menzel - Let It Go (from Frozen) (Official Video)" existing_artist "DisneyMusicVEVO"
+-> {"title":"Let It Go","artist":"Idina Menzel","featured":[],"original_artist":null,"album":"Frozen","is_music":true,"confidence":"high","notes":"uploader was tagged as artist"}
+raw "Pocahontas - Colors of the Wind HD" existing_artist "Pocahontas"
+-> {"title":"Colors of the Wind","artist":"Judy Kuhn","featured":[],"original_artist":null,"album":"Pocahontas","is_music":true,"confidence":"medium","notes":"Pocahontas is the movie"}
+raw "Dig a Little Deeper - Princess and the Frog"
+-> {"title":"Dig a Little Deeper","artist":null,"featured":[],"original_artist":null,"album":"The Princess and the Frog","is_music":true,"confidence":"medium","notes":"title first, movie second"}
+raw "Mix - 某歌手/Falling You" existing_artist "Céline Dion" existing_title "Falling into You"
+-> {"title":"Falling You","artist":null,"featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"low","notes":"existing tags are a different song"}
+raw "张三 - 夜空 - DJ版" existing_artist "张三 - 夜空" existing_title "DJ版"
+-> {"title":"夜空 (DJ版)","artist":"张三","featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"high","notes":"artist tag held 'Artist - Title'"}
+raw "【歌手2030·纯享】#李四 《远方》开嗓直击灵魂！｜《歌手2030》｜MangoTV" existing_title "歌手2030"
+-> {"title":"远方","artist":"李四","featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"high","notes":"TV show stage; show name is not the title"}
+raw "舞台纯享《乘风2030》一公舞台《星河》王五 赵六 孙七｜Ride the Wind｜MangoTV"
+-> {"title":"星河","artist":"王五","featured":["赵六","孙七"],"original_artist":null,"album":null,"is_music":true,"confidence":"medium","notes":"group stage"}
+raw "【HD】张三 - 春风 [歌詞字幕][電視劇《某某》主題曲][完整高清音質] Zhang San - Spring Wind"
+-> {"title":"春风","artist":"张三","featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"high","notes":null}
+raw "某歌手：我的巡演要开始了！" folder "某歌手合集"
+-> {"title":null,"artist":null,"featured":[],"original_artist":null,"album":null,"is_music":false,"confidence":"high","notes":"talk clip"}
+raw "Journey To Fansipan PART 1⧸ Vlog Review No. 367" folder "Top Songs of the Decade Playlist"
+-> {"title":null,"artist":null,"featured":[],"original_artist":null,"album":null,"is_music":false,"confidence":"high","notes":"travel vlog"}
+raw "Spidey and His Amazing Friends： Panther Patience [sHSgwpzqKQY]"
+-> {"title":null,"artist":null,"featured":[],"original_artist":null,"album":null,"is_music":false,"confidence":"high","notes":"cartoon episode"}
+
+Respond with ONLY a valid JSON array (no markdown, no commentary), one object per item:
+[{"id":0,"title":...,"artist":...,"featured":[],"original_artist":...,"album":...,"is_music":true,"confidence":"high","notes":...}]
 """
 
 _THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
@@ -108,9 +169,11 @@ def _call_llm(batch: list[dict], use_search: bool = False) -> list[dict] | None:
     """Call the LLM. Search is only attached when use_search=True."""
     req_items = []
     for idx, b in enumerate(batch):
-        item = {"id": idx, "raw": b["raw"]}
+        item = {"id": idx, "raw": clean_raw(b["raw"])}
         if b.get("channel_hint"):
             item["channel"] = b["channel_hint"]
+        if b.get("folder_hint"):
+            item["folder"] = b["folder_hint"]
         if b.get("existing_title"):
             item["existing_title"] = b["existing_title"]
         if b.get("existing_artist"):
@@ -235,10 +298,25 @@ def _load_info_and_channel(mp3_path: Path) -> tuple[dict | None, str | None]:
 def parse_one(path: Path) -> dict:
     """Parse a single mp3 by filename + optional yt-dlp metadata."""
     info, channel_hint = _load_info_and_channel(path)
-    try:
-        meta = parse_title(path.stem, info_meta=info)
-    except TypeError:
-        meta = parse_title(path.stem)
+    import config as _cfg
+    rules = None
+    if getattr(_cfg, "USE_TITLE_RULES", True):
+        from title_rules import parse as _rules_parse
+        rules = _rules_parse(path.stem)
+    if rules:
+        meta = {"title": rules["title"], "artist": rules["artist"], "featured": rules["featured"],
+                "original_artist": rules.get("original_artist"), "album": None,
+                "confidence": "rules", "needs_llm": False, "raw": clean_raw(path.stem),
+                "llm_notes": f"rules:{rules['rule']}"}
+    elif not getattr(_cfg, "USE_REGEX_PARSER", False):
+        # Regex parsing disabled (see tests/eval_regex.py): every file goes to the LLM.
+        meta = {"title": None, "artist": None, "featured": [], "album": None,
+                "confidence": "none", "needs_llm": True, "raw": clean_raw(path.stem)}
+    else:
+        try:
+            meta = parse_title(path.stem, info_meta=info)
+        except TypeError:
+            meta = parse_title(path.stem)
     meta["file"] = path.name
     if channel_hint:
         meta["channel_hint"] = channel_hint
@@ -254,7 +332,8 @@ _KNOWN_HYPHEN = {
     "t-ara", "u-know", "nct 127", "nct dream",
 }
 
-_SPECIAL_RE = _re.compile(r"[^\w\s\-()\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", _re.UNICODE)
+# Keep apostrophes, periods, commas, & ! ? + so "You're Welcome", "Fire EX.", "What's This?" survive
+_SPECIAL_RE = _re.compile(r"[^\w\s\-()'’.,&!?+\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", _re.UNICODE)
 _MULTI_SPACE = _re.compile(r"\s+")
 
 
@@ -374,7 +453,20 @@ def _apply_row(meta: dict, llm_row: dict):
     else:
         meta["featured"] = []
 
-    meta["confidence"] = "medium" if (title or artist) else "low"
+    if isinstance(llm_row.get("original_artist"), str) and llm_row["original_artist"].strip():
+        meta["original_artist"] = llm_row["original_artist"].strip()
+    is_music = llm_row.get("is_music")
+    if is_music is False or str(is_music).lower() == "false":
+        meta.update(is_music=False, title="", artist="", album="", featured=[])
+    else:
+        meta["is_music"] = True
+    conf = str(llm_row.get("confidence") or "").lower()
+    if conf not in ("high", "medium", "low"):
+        conf = "medium" if (title or artist) else "low"
+    if conf == "low" and meta.get("is_music"):
+        # don't write guesses; clear instead (pass 2 may retry with search)
+        meta.update(title="", artist="", album="")
+    meta["confidence"] = conf
     meta["needs_llm"] = False
     meta["llm_notes"] = llm_row.get("notes") or "llm_ok"
     meta["llm_authoritative"] = True
@@ -412,7 +504,7 @@ def apply_llm_batch(batch: list[dict]) -> list[dict]:
             continue
         _apply_row(meta, row)
         # Unsure if title or artist is still empty
-        if not meta.get("title") or not meta.get("artist"):
+        if meta.get("is_music") is not False and (not meta.get("title") or not meta.get("artist")):
             unsure.append((idx, meta))
 
     # ---- Pass 2: search only for unsure items ----
