@@ -78,6 +78,14 @@ raw "Dig a Little Deeper - Princess and the Frog"
 -> {"title":"Dig a Little Deeper","artist":null,"featured":[],"original_artist":null,"album":"The Princess and the Frog","is_music":true,"confidence":"medium","notes":"title first, movie second"}
 raw "Mix - 某歌手/Falling You" existing_artist "Céline Dion" existing_title "Falling into You"
 -> {"title":"Falling You","artist":null,"featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"low","notes":"existing tags are a different song"}
+raw "张三 - 夜空 - DJ版" existing_artist "张三 - 夜空" existing_title "DJ版"
+-> {"title":"夜空 (DJ版)","artist":"张三","featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"high","notes":"artist tag held 'Artist - Title'"}
+raw "【歌手2030·纯享】#李四 《远方》开嗓直击灵魂！｜《歌手2030》｜MangoTV" existing_title "歌手2030"
+-> {"title":"远方","artist":"李四","featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"high","notes":"TV show stage; show name is not the title"}
+raw "舞台纯享《乘风2030》一公舞台《星河》王五 赵六 孙七｜Ride the Wind｜MangoTV"
+-> {"title":"星河","artist":"王五","featured":["赵六","孙七"],"original_artist":null,"album":null,"is_music":true,"confidence":"medium","notes":"group stage"}
+raw "【HD】张三 - 春风 [歌詞字幕][電視劇《某某》主題曲][完整高清音質] Zhang San - Spring Wind"
+-> {"title":"春风","artist":"张三","featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"high","notes":null}
 raw "某歌手：我的巡演要开始了！" folder "某歌手合集"
 -> {"title":null,"artist":null,"featured":[],"original_artist":null,"album":null,"is_music":false,"confidence":"high","notes":"talk clip"}
 raw "Journey To Fansipan PART 1⧸ Vlog Review No. 367" folder "Top Songs of the Decade Playlist"

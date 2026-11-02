@@ -88,6 +88,17 @@ _TITLE_JUNK_RE = re.compile(
 
 NON_MUSIC_TAG = "PIPELINE_NON_MUSIC"
 
+# Album that is really a YouTube channel tab / playlist ("X - Videos", "Mix - ...").
+# clean-junk replaces it with the title (the single-track album convention).
+_CHANNEL_ALBUM_RE = re.compile(r"\s-\s(videos|shorts|topic)$|^(mix|top songs)\s-\s|^uploads from ", re.I)
+
+# Variety-show / contest names that end up in the title tag
+_SHOW_RE = re.compile(
+    r"^(ride the wind|乘风\s*20\d\d|乘風\s*20\d\d|歌手\s*20\d\d|singer\s*20\d\d|sing!?\s*asia|"
+    r"我是歌手.*|中国好声音.*|中國好聲音.*|天赐的声音.*|声生不息.*|时光音乐会.*|eurovision.*|打歌20\d\d.*)$",
+    re.I,
+)
+
 
 def _looks_like_uploader(artist: str, path: Path | None = None) -> bool:
     a = (artist or "").strip()
@@ -1026,6 +1037,13 @@ def clean_junk_folder(folder: Path):
                     tags.delall(key)
                     changed = True
 
+            # Album that is a channel/playlist name -> use the title
+            if "TALB" in tags and tags["TALB"].text and "TIT2" in tags and tags["TIT2"].text:
+                if _CHANNEL_ALBUM_RE.search(str(tags["TALB"].text[0]).strip()):
+                    from mutagen.id3 import TALB
+                    tags.setall("TALB", [TALB(encoding=3, text=[str(tags["TIT2"].text[0])])])
+                    changed = True
+
             if changed:
                 audio.save()
                 cleaned += 1
@@ -1463,6 +1481,13 @@ def _tags_look_wrong(path: Path, tags: dict) -> list[str]:
     # Title still carries lyric-video / YouTube junk
     if title and _TITLE_JUNK_RE.search(title):
         reasons.append("title_junk")
+
+    # Artist tag swallowed "Artist - Title" (title then holds a suffix like "伴奏版")
+    if artist and (re.search(r"\s[-–]\s", artist) or re.search(r"[【】#|｜]", artist)):
+        reasons.append("artist_junk")
+    # Title is a TV show / contest name, not a song
+    if title and _SHOW_RE.search(title):
+        reasons.append("title_is_show")
 
     from match_guard import fold
     stem_f = fold(path.stem)
