@@ -90,6 +90,10 @@ On 56 realistic YouTube titles (`python tests/eval_regex.py`):
 
 All 17 wrong `--from-filename` results looked well-tagged afterwards, so `--process` never sent them to the LLM.
 
+### Regex maintenance principle
+
+Accuracy first, coverage second. The regex is a first pass that only answers when a filename matches one of its known patterns. A pattern is kept only if it is right almost every time it answers (currently 99.1% accurate on the files it handles, covering about 19% of the library). Anything it can't confidently match goes to the local LLM, with a prompt that includes worked examples from this library. When adding or changing patterns, prefer fewer, stricter patterns over broader ones that risk mislabeling.
+
 ### High-precision title rules (`title_rules.py`, on by default)
 
 Instead of the general regex, a small set of rules handles only a few unambiguous shapes and abstains on everything else (`USE_TITLE_RULES = True`):
