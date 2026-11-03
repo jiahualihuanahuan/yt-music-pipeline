@@ -116,3 +116,22 @@ class FillOnlyTests(Base):
              mock.patch.object(pipeline, "fill_missing_folder") as fill:
             pipeline.process_folder(src, lyrics=False)
         retag.assert_called_once(); orglib.assert_called_once(); fill.assert_not_called()
+
+
+class ReprocessTests(Base):
+    def test_reprocess_overwrites(self):
+        org = self.d / "organized"; album = org / "a" / "b"; album.mkdir(parents=True)
+        f = make_mp3(album / "x.mp3", TIT2=TIT2(encoding=3, text="晴天"), TPE1=TPE1(encoding=3, text="周杰伦"),
+                     USLT=USLT(encoding=3, lang="und", desc="", text="old"))
+        f.with_suffix(".lrc").write_text("old", encoding="utf-8")
+        with mock.patch.object(pipeline, "ORGANIZED_DIR", org), \
+             mock.patch.object(pipeline, "reprocess_folder") as rp, \
+             mock.patch.object(pipeline, "fix_art_folder") as fa, \
+             mock.patch.object(pipeline, "organize_library") as ol, \
+             mock.patch.object(pipeline, "fill_missing_folder") as fill, \
+             mock.patch.object(lyrics.requests, "get", return_value=Resp(HIT)):
+            pipeline.process_folder(album, reprocess=True)
+        rp.assert_called_once(); fill.assert_not_called(); ol.assert_not_called()
+        self.assertTrue(fa.call_args.kwargs["force"])
+        self.assertEqual(MP3(f).tags.getall("USLT")[0].text, "故事的小黄花")
+        self.assertIn("[00:01.00]", f.with_suffix(".lrc").read_text(encoding="utf-8"))

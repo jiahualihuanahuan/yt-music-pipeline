@@ -173,8 +173,8 @@ def read_basic(path: Path) -> dict:
     return out
 
 
-def write_plain(path: Path, text: str) -> bool:
-    """Write plain lyrics into the file's tag. Never overwrites existing lyrics."""
+def write_plain(path: Path, text: str, overwrite: bool = False) -> bool:
+    """Write plain lyrics into the file's tag. Existing lyrics are kept unless overwrite."""
     ext = path.suffix.lower()
     if ext == ".mp3":
         from mutagen.mp3 import MP3
@@ -182,21 +182,22 @@ def write_plain(path: Path, text: str) -> bool:
         a = MP3(path)
         if a.tags is None:
             a.add_tags()
-        if a.tags.getall("USLT"):
+        if a.tags.getall("USLT") and not overwrite:
             return False
+        a.tags.delall("USLT")
         a.tags.add(USLT(encoding=3, lang="und", desc="", text=text))
     elif ext in (".m4a", ".mp4"):
         from mutagen.mp4 import MP4
         a = MP4(path)
         if a.tags is None:
             a.add_tags()
-        if a.tags.get("\xa9lyr"):
+        if a.tags.get("\xa9lyr") and not overwrite:
             return False
         a.tags["\xa9lyr"] = [text]
     elif ext == ".flac":
         from mutagen.flac import FLAC
         a = FLAC(path)
-        if a.get("lyrics"):
+        if a.get("lyrics") and not overwrite:
             return False
         a["lyrics"] = text
     else:
@@ -205,11 +206,11 @@ def write_plain(path: Path, text: str) -> bool:
     return True
 
 
-def add_lyrics(path: Path) -> str:
+def add_lyrics(path: Path, overwrite: bool = False) -> str:
     """Fill lyrics for one file. Returns: added / has / instrumental / notfound / notags."""
     info = read_basic(path)
     lrc = path.with_suffix(".lrc")
-    if info["has_lyrics"] and lrc.exists():
+    if info["has_lyrics"] and lrc.exists() and not overwrite:
         return "has"
     if not info["title"] or not info["artist"]:
         return "notags"
@@ -219,9 +220,9 @@ def add_lyrics(path: Path) -> str:
     if res["instrumental"]:
         return "instrumental"
     did = False
-    if res["plain"] and not info["has_lyrics"]:
-        did = write_plain(path, res["plain"]) or did
-    if res["synced"] and not lrc.exists():
+    if res["plain"] and (overwrite or not info["has_lyrics"]):
+        did = write_plain(path, res["plain"], overwrite) or did
+    if res["synced"] and (overwrite or not lrc.exists()):
         lrc.write_text(res["synced"] + "\n", encoding="utf-8")
         did = True
     return "added" if did else "has"
@@ -230,7 +231,7 @@ def add_lyrics(path: Path) -> str:
 AUDIO_EXTS = (".mp3", ".m4a", ".flac")
 
 
-def lyrics_folder(folder: Path, files=None) -> dict:
+def lyrics_folder(folder: Path, files=None, overwrite: bool = False) -> dict:
     """Fill missing lyrics (+ .lrc) for every mp3/m4a/flac under folder."""
     folder = Path(folder)
     if files is None:
@@ -238,7 +239,7 @@ def lyrics_folder(folder: Path, files=None) -> dict:
     counts: dict = {}
     for f in files:
         try:
-            r = add_lyrics(f)
+            r = add_lyrics(f, overwrite)
         except Exception as e:
             print(f"  lyrics failed for {f.name}: {e}")
             r = "error"

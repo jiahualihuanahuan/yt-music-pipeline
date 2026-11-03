@@ -18,16 +18,16 @@ class TagMusicCLI(unittest.TestCase):
         d = tempfile.mkdtemp()
         rc, pf = self.run_cli([d])
         self.assertEqual(rc, 0)
-        pf.assert_called_once_with(Path(d), fix_art=True, organize=True, delete=None, lyrics=True, fill_only=None)
+        pf.assert_called_once_with(Path(d), fix_art=True, organize=True, delete=None, lyrics=True, fill_only=None, reprocess=False)
 
     def test_flags(self):
         d = tempfile.mkdtemp()
         rc, pf = self.run_cli([d, "--no-fix-art", "--no-organize", "--no-delete", "--no-lyrics", "--fill-only"])
-        pf.assert_called_once_with(Path(d), fix_art=False, organize=False, delete=False, lyrics=False, fill_only=True)
+        pf.assert_called_once_with(Path(d), fix_art=False, organize=False, delete=False, lyrics=False, fill_only=True, reprocess=False)
 
     def test_default_folder_is_music_dir(self):
         d = tempfile.mkdtemp()
-        with mock.patch.object(pipeline, "MUSIC_DIR", Path(d)):
+        with mock.patch.object(pipeline, "DEFAULT_FOLDER", Path(d)):
             rc, pf = self.run_cli([])
         self.assertEqual(pf.call_args.args[0], Path(d))
 
@@ -39,3 +39,28 @@ class TagMusicCLI(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm, mock.patch("sys.stdout"):
             tag_music.build_parser().parse_args(["--help"])
         self.assertEqual(cm.exception.code, 0)
+
+
+class ReprocessAndDefault(unittest.TestCase):
+    def test_reprocess_flag(self):
+        d = tempfile.mkdtemp()
+        with mock.patch.object(pipeline, "process_folder") as pf, mock.patch.object(pipeline, "init_db"):
+            tag_music.main([d, "--reprocess"])
+        self.assertTrue(pf.call_args.kwargs["reprocess"])
+
+    def test_default_is_home_music(self):
+        self.assertEqual(pipeline.DEFAULT_FOLDER, Path.home() / "Music")
+
+    def test_main_py_cli(self):
+        d = tempfile.mkdtemp()
+        with mock.patch.object(pipeline, "process_folder") as pf, mock.patch.object(pipeline, "init_db"), \
+             mock.patch("sys.argv", ["main.py", d, "--reprocess", "--no-lyrics"]):
+            pipeline.main()
+        pf.assert_called_once()
+        self.assertEqual(pf.call_args.args[0], Path(d))
+        self.assertTrue(pf.call_args.kwargs["reprocess"]); self.assertFalse(pf.call_args.kwargs["lyrics"])
+        with mock.patch.object(pipeline, "process_folder") as pf, mock.patch.object(pipeline, "init_db"), \
+             mock.patch("sys.argv", ["main.py"]):
+            pipeline.main()
+        self.assertEqual(pf.call_args.args[0], Path.home() / "Music")
+        self.assertFalse(pf.call_args.kwargs["reprocess"])

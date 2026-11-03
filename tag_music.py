@@ -33,7 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="tag-music", description=DESCRIPTION,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folder", nargs="?", metavar="FOLDER",
-                    help="folder with MP3 files (searched recursively). Default: MUSIC_DIR from config")
+                    help="folder with MP3 files (searched recursively). Default: your Music folder "
+                         "(C:\\Users\\<name>\\Music on Windows, ~/Music elsewhere). "
+                         "Pass ORGANIZED_DIR (or a sub-folder) to fill in what is missing there")
     ap.add_argument("--no-fix-art", action="store_true", help="skip the cover-art step")
     ap.add_argument("--no-organize", action="store_true",
                     help="tag in place only; do not move files into ORGANIZED_DIR (no dedup)")
@@ -41,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--fill-only", action="store_true",
                     help="re-run mode: only fill empty tags, lyrics and missing art; never overwrite, "
                          "move, rename or delete. Automatic when FOLDER is inside ORGANIZED_DIR")
+    ap.add_argument("--reprocess", action="store_true",
+                    help="full re-run: re-read and re-tag every file, overwriting existing tags, "
+                         "lyrics and cover art (default is to only fill what is empty)")
     ap.add_argument("--no-delete", action="store_true",
                     help="do not move non-music / 伴奏 / DJ versions to DELETE_DIR (only list them)")
     return ap
@@ -49,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     import main as pipeline  # imported late so --help works without config/deps
-    folder = Path(args.folder).expanduser() if args.folder else Path(pipeline.MUSIC_DIR)
+    folder = Path(args.folder).expanduser() if args.folder else Path(pipeline.DEFAULT_FOLDER)
     if not folder.is_dir():
         print(f"not a folder: {folder}", file=sys.stderr)
         return 2
@@ -59,7 +64,8 @@ def main(argv=None) -> int:
         print(f"WARNING: could not init local DB: {e}")
     pipeline.process_folder(folder, fix_art=not args.no_fix_art, organize=not args.no_organize,
                             delete=False if args.no_delete else None,
-                            lyrics=not args.no_lyrics, fill_only=True if args.fill_only else None)
+                            lyrics=not args.no_lyrics, fill_only=True if args.fill_only else None,
+                            reprocess=args.reprocess)
     return 0
 
 

@@ -5,8 +5,8 @@ Works only on MP3s that are already on disk (no YouTube search/download).
 
 Usage:
   python main.py /path/to/music               # recommended: same as --process DIR
-  python main.py                              # same, on MUSIC_DIR from config
-  python main.py --reprocess /path/to/music   # retag all MP3s in folder (in place)
+  python main.py                              # same, on ~/Music (C:\\Users\\<name>\\Music)
+  python main.py DIR --reprocess              # full re-run, overwrite tags/lyrics/art
   python main.py --fill-missing /path/to/music # only retag files missing title/artist/album
   python main.py --llm-only /path/to/music    # force LLM inference only (overwrite tags, no regex)
   python main.py --remove-tags /path/to/music # strip text ID3 tags (keep cover art)
@@ -976,7 +976,8 @@ def _find_local_cover(mp3: Path) -> Path | None:
     return None
 
 
-def fix_art_folder(folder: Path, include_organized: bool = False, keep_existing: bool = False):
+def fix_art_folder(folder: Path, include_organized: bool = False, keep_existing: bool = False,
+                   force: bool = False):
     """Embed a good cover for every MP3.
 
     Priority:
@@ -1015,7 +1016,7 @@ def fix_art_folder(folder: Path, include_organized: bool = False, keep_existing:
                 if _apic_is_good(frame):
                     good = True
                     break
-            if good or (keep_existing and tags.getall("APIC")):
+            if not force and (good or (keep_existing and tags.getall("APIC"))):
                 kept += 1
                 continue
 
@@ -1483,7 +1484,7 @@ def fix_wrong_folder(folder: Path):
 
 
 def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, delete: bool | None = None,
-                   lyrics: bool = True, fill_only: bool | None = None):
+                   lyrics: bool = True, fill_only: bool | None = None, reprocess: bool = False):
     """One-pass for a mixed library.
 
     1. Strip YouTube junk tags
@@ -1496,10 +1497,26 @@ def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, de
 
     fill_only (default: auto, True when folder is inside ORGANIZED_DIR): re-run
     mode for an already-organized library, see fill_missing_folder.
+    reprocess=True: full re-run on every file (organized too), overwriting
+    tags, lyrics and cover art; then organize as usual.
     """
     folder = folder.resolve()
     if not folder.is_dir():
         print(f"not a directory: {folder}")
+        return
+    if reprocess:
+        print(f"reprocess: full re-tag of every file under {folder} (overwrites tags, lyrics, art)")
+        reprocess_folder(folder, only_missing=False)
+        if lyrics:
+            print("\n--- lyrics (overwrite) ---")
+            from lyrics import lyrics_folder
+            lyrics_folder(folder, files=_list_mp3s(folder, include_organized=True), overwrite=True)
+        if fix_art:
+            print("\n--- fix art (overwrite) ---")
+            fix_art_folder(folder, include_organized=True, force=True)
+        if organize and not _is_under_organized(folder):
+            print("\n--- organize ---")
+            organize_library(folder)
         return
     if fill_only is None:
         fill_only = _is_under_organized(folder)
@@ -1764,12 +1781,16 @@ def dump_tags_folder(folder: Path):
     print(f"done: wrote {len(all_mp3s)} files to {out_path}")
 
 
+DEFAULT_FOLDER = Path.home() / "Music"  # C:\\Users\\<name>\\Music on Windows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("folder", nargs="?", metavar="DIR",
-                    help="run the full process (metadata, dedup, art, organize) on DIR (default: MUSIC_DIR)")
-    ap.add_argument("--reprocess", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
-                    help=f"reparse + retag all MP3s under DIR (default: {MUSIC_DIR})")
+                    help="run the full process (metadata, lyrics, art, dedup, organize) on DIR "
+                         "(default: your Music folder, Path.home()/'Music')")
+    ap.add_argument("--reprocess", action="store_true",
+                    help="full re-run: re-tag every file and overwrite existing tags, lyrics and art")
     ap.add_argument("--fill-missing", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help=f"only retag MP3s missing title, artist, or album (default: {MUSIC_DIR})")
     ap.add_argument("--llm-only", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
@@ -1849,7 +1870,8 @@ def main():
     if args.process:
         process_folder(Path(args.process), fix_art=not args.no_fix_art, organize=not args.no_organize,
                        delete=False if args.no_delete else None,
-                       lyrics=not args.no_lyrics, fill_only=True if args.fill_only else None)
+                       lyrics=not args.no_lyrics, fill_only=True if args.fill_only else None,
+                       reprocess=args.reprocess)
         return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))
@@ -1863,15 +1885,13 @@ def main():
     if args.fill_missing:
         reprocess_folder(Path(args.fill_missing), only_missing=True)
         return
-    if args.reprocess:
-        reprocess_folder(Path(args.reprocess), only_missing=False)
-        return
 
     # default: one-pass process on DIR (or MUSIC_DIR)
-    process_folder(Path(args.folder) if args.folder else MUSIC_DIR,
+    process_folder(Path(args.folder).expanduser() if args.folder else DEFAULT_FOLDER,
                    fix_art=not args.no_fix_art, organize=not args.no_organize,
                    delete=False if args.no_delete else None,
-                       lyrics=not args.no_lyrics, fill_only=True if args.fill_only else None)
+                       lyrics=not args.no_lyrics, fill_only=True if args.fill_only else None,
+                       reprocess=args.reprocess)
 
 if __name__ == "__main__":
     main()

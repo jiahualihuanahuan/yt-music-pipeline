@@ -3,7 +3,7 @@
 Cleans up, tags, dedupes and organizes MP3s that are **already on disk** (e.g. a library for the Vroom player). It does not search or download anything from YouTube.
 
 ```bash
-python main.py /path/to/music        # the whole process on one folder (default: MUSIC_DIR)
+python main.py /path/to/music        # the whole process on one folder (default: ~/Music)
 ```
 
 That one command runs: junk-tag cleanup -> metadata (title rules / local LLM + MusicBrainz, Last.fm fallback) -> artwork -> dedup + organize into `ORGANIZED_DIR`. See [`--process` step by step](#--process-step-by-step). Single steps are available as flags (see [Library mode](#library-mode)).
@@ -32,11 +32,18 @@ python tag_music.py ~/Music/to-tag
 pip install -e . && tag-music ~/Music/to-tag --no-fix-art   # optional console command
 ```
 
-Options: `FOLDER` (default `MUSIC_DIR`), `--no-fix-art`, `--no-organize`, `--no-delete`, `--no-lyrics`, `--fill-only`, `--help`.
+Options: `FOLDER` (default: your Music folder, `Path.home() / "Music"`, i.e. `C:\Users\<name>\Music` on Windows, `~/Music` on macOS/Linux; pass `ORGANIZED_DIR` or a sub-folder to fill in what is missing there), `--reprocess`, `--no-fix-art`, `--no-organize`, `--no-delete`, `--no-lyrics`, `--fill-only`, `--help`.
+
+```bat
+python tag_music.py                                   &REM tag C:\Users\<name>\Music
+python tag_music.py "D:\Music\organized" --reprocess  &REM full re-run, overwrite everything
+```
+
+**`--reprocess`**: forces a full re-run. Every file (organized ones too) is re-read and re-tagged (title rules / LLM + MusicBrainz / Last.fm), and existing tags, lyrics, `.lrc` and cover art are overwritten; files outside `ORGANIZED_DIR` are then organized as usual. Without it, nothing that is already set is overwritten.
 
 **Lyrics** (LRCLIB, free, no key): for each song with a title and artist, `lyrics.py` asks `https://lrclib.net/api/get` with artist + title + album + duration, then with artist + title only, then `/api/search`. Plain lyrics go into the tag (ID3 `USLT` for MP3, `©lyr` for M4A, `LYRICS` for FLAC). Synced lyrics are saved as `<same name>.lrc` next to the file and move with it on organize. Instrumentals and misses are skipped. Results (including misses) are cached in the SQLite cache (`lyrics_cache` table), and requests are spaced 0.4 s apart. Existing lyrics and `.lrc` files are never overwritten. Skip the step with `--no-lyrics`.
 
-**Re-running on an organized library**: when `FOLDER` is inside `ORGANIZED_DIR` (e.g. `ORGANIZED_DIR\\Artist\\Album`), or with `--fill-only`, the app only fills what is empty: album / album artist / year / genre (MusicBrainz, then Last.fm), lyrics and `.lrc`, and cover art for files that have none. It never overwrites tags or art, never moves, renames or deletes files, and does not call the LLM. Files need a title and artist already.
+**Re-running on an organized library**: when `FOLDER` is inside `ORGANIZED_DIR` (e.g. `ORGANIZED_DIR\Artist\Album`), or with `--fill-only`, the app only fills what is empty: album / album artist / year / genre (MusicBrainz, then Last.fm), lyrics and `.lrc`, and cover art for files that have none. It never overwrites tags or art, never moves, renames or deletes files, and does not call the LLM. Files need a title and artist already.
 
 It needs, in `config_local.py` next to the code: `LLM_BASE_URL` / `LLM_MODEL` for a local OpenAI-compatible LLM (e.g. vLLM, LM Studio, Ollama), `ORGANIZED_DIR` / `DELETE_DIR` set to Windows paths on Windows (e.g. `Path(r"D:\Music\organized")`; the defaults are Linux paths), optionally `LASTFM_API_KEY` (genre + fallback album/cover) and `MB_CONTACT`. MusicBrainz and Cover Art Archive need no key. `python main.py FOLDER` does the same thing.
 
@@ -203,7 +210,7 @@ Items the LLM is still unsure about get a second pass with web-search context fr
 
 ## Library mode
 
-Each flag takes an optional `DIR` (default `MUSIC_DIR`) and works recursively on `*.mp3` files, skipping hidden files. Only **one** command runs per call. If several are given, the first one in this order wins: `--dump-tags`, `--clean-junk`, `--from-filename`, `--needs-tag`, `--fix-art`, `--organize`, `--fix-wrong`, `--build-aliases`, `--merge-artists`, `--process`, `--llm-only`, `--remove-tags`, `--lyrics`, `--fill-missing`, `--reprocess`.
+Each flag takes an optional `DIR` (default `MUSIC_DIR`) and works recursively on `*.mp3` files, skipping hidden files. Only **one** command runs per call. If several are given, the first one in this order wins: `--dump-tags`, `--clean-junk`, `--from-filename`, `--needs-tag`, `--fix-art`, `--organize`, `--fix-wrong`, `--build-aliases`, `--merge-artists`, `--process`, `--llm-only`, `--remove-tags`, `--lyrics`, `--fill-missing`; otherwise the positional `DIR` (default `~/Music`) runs the full process.
 
 Commands marked "skips organized" ignore files under `ORGANIZED_DIR`.
 
@@ -217,7 +224,7 @@ Commands marked "skips organized" ignore files under `ORGANIZED_DIR`.
 | `--fix-art [DIR]` | Make sure each MP3 has good embedded art: keep an existing APIC (≥8 KB and ≥200×200), else use a nearby `cover.jpg`/`folder.jpg`/`<name>.jpg`/largest `*.jpg`, else fetch from MusicBrainz/Cover Art Archive, iTunes, Deezer, then Last.fm (needs title+artist). Art is cropped to 600×600 with a border. Skips organized. |
 | `--organize [DIR]` | Move well-tagged files (valid title, artist, album) to `ORGANIZED_DIR/<Artist>/<Album>/<filename>`. **Deletes** exact duplicates (same size + MD5) of files already organized. Adds `_<size>` to the name if one exists. Removes empty directories in `DIR` and `ORGANIZED_DIR`. Badly tagged files are left in place. |
 | `--fill-missing [DIR]` | Retag (LLM + enrichment) only files missing a valid title/artist/album. Files with a MusicBrainz ID and valid artist/title are skipped. |
-| `--reprocess [DIR]` | Re-parse and retag every MP3 in place. |
+| `DIR --reprocess` | Full re-run on `DIR`: re-tag every MP3 (organized too) and overwrite tags, lyrics and art, then organize. A modifier now, not a command. |
 | `--llm-only [DIR]` | Send every filename to the LLM (no regex) and overwrite tags in place. |
 | `--remove-tags [DIR]` | Strip text ID3 tags but **keep embedded cover art**. |
 | `--lyrics [DIR]` | Add LRCLIB lyrics (USLT) to files that already have title+artist. |
@@ -225,7 +232,7 @@ Commands marked "skips organized" ignore files under `ORGANIZED_DIR`.
 | `--build-aliases [DIR]` | Propose a duplicate-artist map, see [Duplicate artist folders](#duplicate-artist-folders). |
 | `--merge-artists [DIR] [--apply]` | Merge duplicate artist spellings (dry run unless `--apply`). Default DIR is `ORGANIZED_DIR`. |
 
-`--fill-missing`, `--reprocess`, `--llm-only`, `--remove-tags`, `--lyrics` and `--dump-tags` use their own `rglob` and **do not** skip `ORGANIZED_DIR`.
+`--fill-missing`, `--llm-only`, `--remove-tags`, `--lyrics` and `--dump-tags` use their own `rglob` and **do not** skip `ORGANIZED_DIR`.
 
 ### `--process` step by step
 
