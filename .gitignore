@@ -11,3 +11,5 @@ __pycache__/
 .DS_Store
 cookies.txt
 config_local.py
+*.egg-info/
+build/

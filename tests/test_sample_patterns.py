@@ -114,18 +114,17 @@ class Guard(unittest.TestCase):
         self.assertTrue(mg.accept("Let It Go", "Idina Menzel", "Let It Go (From \"Frozen\")", "Idina Menzel"))
         self.assertTrue(mg.accept("Beauty and the Beast", "Ariana Grande", "Beauty and the Beast", "Ariana Grande, John Legend"))
 
-    def test_spotify_needs_title_match(self):
+    def test_lastfm_needs_title_match(self):
         ms.clear_cache()
-        wrong = {"tracks": {"items": [{"name": "Falling into You", "artists": [{"name": "Céline Dion", "id": "a"}],
-                                       "album": {"name": "Falling into You", "album_type": "album", "images": []}}]}}
-        with mock.patch.object(ms.cfg, "SPOTIFY_CLIENT_ID", "x"), mock.patch.object(ms.cfg, "SPOTIFY_CLIENT_SECRET", "y"), \
-             mock.patch.object(ms, "_spotify_token", return_value="t"), \
-             mock.patch.object(ms, "_spotify_get", return_value=wrong):
-            self.assertIsNone(ms.spotify_lookup("Falling You", "Céline Dion"))
+        wrong = {"track": {"name": "Falling into You", "artist": {"name": "Céline Dion"}, "album": {}}}
+        resp = mock.Mock(status_code=200); resp.json.return_value = wrong; resp.raise_for_status = lambda: None
+        with mock.patch.object(ms.cfg, "LASTFM_API_KEY", "x"), mock.patch.object(ms, "_throttle", lambda s: None), \
+             mock.patch.object(ms.requests, "get", return_value=resp):
+            self.assertIsNone(ms.lastfm_lookup("Falling You", "Céline Dion"))
         ms.clear_cache()
 
     def test_supplement_skips_non_music(self):
-        with mock.patch.object(ms, "spotify_lookup") as sp:
+        with mock.patch.object(ms, "lastfm_lookup") as sp:
             ms.supplement({"title": "x", "artist": "y", "is_music": False})
             sp.assert_not_called()
 

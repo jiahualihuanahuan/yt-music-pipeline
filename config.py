@@ -282,8 +282,6 @@ SEARXNG_MAX_RESULTS = 5
 
 # ---------- API keys (optional) ----------
 LASTFM_API_KEY = ""          # set in config_local.py (https://www.last.fm/api/account/create)
-SPOTIFY_CLIENT_ID = ""       # set in config_local.py (developer.spotify.com dashboard)
-SPOTIFY_CLIENT_SECRET = ""
 DISCOGS_TOKEN = ""           # currently unused
 
 # ---------- Misc ----------

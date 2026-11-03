@@ -1,6 +1,6 @@
 """Similarity guard for enrichment results.
 
-A lookup result (MusicBrainz / Spotify / Last.fm / iTunes / Deezer) is only
+A lookup result (MusicBrainz / Last.fm / iTunes / Deezer) is only
 accepted when BOTH its artist and title are close to what we searched for.
 Comparison ignores case, punctuation, bracketed suffixes ("(Remastered)",
 "(From Moana)"), fullwidth forms and Traditional vs Simplified Chinese.
