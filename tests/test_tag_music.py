@@ -18,12 +18,12 @@ class TagMusicCLI(unittest.TestCase):
         d = tempfile.mkdtemp()
         rc, pf = self.run_cli([d])
         self.assertEqual(rc, 0)
-        pf.assert_called_once_with(Path(d), fix_art=True, organize=True, delete=None)
+        pf.assert_called_once_with(Path(d), fix_art=True, organize=True, delete=None, lyrics=True, fill_only=None)
 
     def test_flags(self):
         d = tempfile.mkdtemp()
-        rc, pf = self.run_cli([d, "--no-fix-art", "--no-organize", "--no-delete"])
-        pf.assert_called_once_with(Path(d), fix_art=False, organize=False, delete=False)
+        rc, pf = self.run_cli([d, "--no-fix-art", "--no-organize", "--no-delete", "--no-lyrics", "--fill-only"])
+        pf.assert_called_once_with(Path(d), fix_art=False, organize=False, delete=False, lyrics=False, fill_only=True)
 
     def test_default_folder_is_music_dir(self):
         d = tempfile.mkdtemp()

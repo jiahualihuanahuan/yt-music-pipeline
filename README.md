@@ -32,7 +32,11 @@ python tag_music.py ~/Music/to-tag
 pip install -e . && tag-music ~/Music/to-tag --no-fix-art   # optional console command
 ```
 
-Options: `FOLDER` (default `MUSIC_DIR`), `--no-fix-art`, `--no-organize`, `--no-delete`, `--help`.
+Options: `FOLDER` (default `MUSIC_DIR`), `--no-fix-art`, `--no-organize`, `--no-delete`, `--no-lyrics`, `--fill-only`, `--help`.
+
+**Lyrics** (LRCLIB, free, no key): for each song with a title and artist, `lyrics.py` asks `https://lrclib.net/api/get` with artist + title + album + duration, then with artist + title only, then `/api/search`. Plain lyrics go into the tag (ID3 `USLT` for MP3, `©lyr` for M4A, `LYRICS` for FLAC). Synced lyrics are saved as `<same name>.lrc` next to the file and move with it on organize. Instrumentals and misses are skipped. Results (including misses) are cached in the SQLite cache (`lyrics_cache` table), and requests are spaced 0.4 s apart. Existing lyrics and `.lrc` files are never overwritten. Skip the step with `--no-lyrics`.
+
+**Re-running on an organized library**: when `FOLDER` is inside `ORGANIZED_DIR` (e.g. `ORGANIZED_DIR\\Artist\\Album`), or with `--fill-only`, the app only fills what is empty: album / album artist / year / genre (MusicBrainz, then Last.fm), lyrics and `.lrc`, and cover art for files that have none. It never overwrites tags or art, never moves, renames or deletes files, and does not call the LLM. Files need a title and artist already.
 
 It needs, in `config_local.py` next to the code: `LLM_BASE_URL` / `LLM_MODEL` for a local OpenAI-compatible LLM (e.g. vLLM, LM Studio, Ollama), `ORGANIZED_DIR` / `DELETE_DIR` set to Windows paths on Windows (e.g. `Path(r"D:\Music\organized")`; the defaults are Linux paths), optionally `LASTFM_API_KEY` (genre + fallback album/cover) and `MB_CONTACT`. MusicBrainz and Cover Art Archive need no key. `python main.py FOLDER` does the same thing.
 
@@ -234,8 +238,9 @@ python main.py --process /srv/music --no-fix-art --no-organize   # retag only
 1. **clean junk**: same as `--clean-junk` (also replaces channel-tab albums like "X - Videos" with the title)
 2. **delete versions + collect**: move 伴奏/DJ versions to `DELETE_DIR` (unless `--no-delete`), then find files that are not well tagged, or whose tags look wrong (same checks as `--fix-wrong`)
 3. **LLM**: retag those files in batches of `LLM_BATCH_SIZE`, then enrich (MusicBrainz, then Last.fm, …) and update the allowlist (skipped if nothing needs it)
-4. **fix art**: same as `--fix-art` on `DIR` (skip with `--no-fix-art`)
-5. **organize**: same as `--organize` on `DIR`, moving files into `ORGANIZED_DIR` (skip with `--no-organize`)
+4. **lyrics**: LRCLIB plain lyrics into the tag + synced `.lrc` sidecar (skip with `--no-lyrics`)
+5. **fix art**: same as `--fix-art` on `DIR` (skip with `--no-fix-art`)
+6. **organize**: same as `--organize` on `DIR`, moving files into `ORGANIZED_DIR` (skip with `--no-organize`)
 
 `--no-fix-art`, `--no-organize` and `--no-delete` have no effect without `--process`.
 

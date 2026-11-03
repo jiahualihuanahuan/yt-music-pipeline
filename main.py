@@ -976,7 +976,7 @@ def _find_local_cover(mp3: Path) -> Path | None:
     return None
 
 
-def fix_art_folder(folder: Path):
+def fix_art_folder(folder: Path, include_organized: bool = False, keep_existing: bool = False):
     """Embed a good cover for every MP3.
 
     Priority:
@@ -989,7 +989,7 @@ def fix_art_folder(folder: Path):
         print(f"not a directory: {folder}")
         return
     print(f"fix-art: scanning {folder} ...")
-    all_mp3s = _list_mp3s(folder)
+    all_mp3s = _list_mp3s(folder, include_organized=include_organized)
     all_mp3s.sort()
     print(f"found {len(all_mp3s)} MP3s")
 
@@ -1015,7 +1015,7 @@ def fix_art_folder(folder: Path):
                 if _apic_is_good(frame):
                     good = True
                     break
-            if good:
+            if good or (keep_existing and tags.getall("APIC")):
                 kept += 1
                 continue
 
@@ -1098,13 +1098,13 @@ def _is_under_delete_dir(path: Path) -> bool:
 _DELETE_RUN = None
 
 
-def _list_mp3s(folder: Path) -> list[Path]:
-    """List MP3s under folder, skipping the organized library and hidden files."""
+def _list_mp3s(folder: Path, include_organized: bool = False) -> list[Path]:
+    """List MP3s under folder, skipping the organized library (unless include_organized) and hidden files."""
     out = []
     for f in folder.rglob("*.mp3"):
         if f.name.startswith("."):
             continue
-        if _is_under_organized(f) or _is_under_delete_dir(f):
+        if (_is_under_organized(f) and not include_organized) or _is_under_delete_dir(f):
             continue
         out.append(f)
     out.sort()
@@ -1228,6 +1228,7 @@ def organize_library(folder: Path):
         if is_dupe:
             try:
                 f.unlink()
+                f.with_suffix(".lrc").unlink(missing_ok=True)
                 dupes += 1
                 print(f"  dupe removed: {f.name}")
             except Exception as e:
@@ -1245,6 +1246,9 @@ def organize_library(folder: Path):
         try:
             import shutil
             shutil.move(str(f), str(dest))
+            lrc = f.with_suffix(".lrc")
+            if lrc.exists() and not dest.with_suffix(".lrc").exists():
+                shutil.move(str(lrc), str(dest.with_suffix(".lrc")))
             size_index.setdefault(dest.stat().st_size, []).append(dest)
             moved += 1
             print(f"  moved: {artist} / {album} / {f.name}")
@@ -1478,29 +1482,119 @@ def fix_wrong_folder(folder: Path):
 
 
 
-def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, delete: bool | None = None):
+def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, delete: bool | None = None,
+                   lyrics: bool = True, fill_only: bool | None = None):
     """One-pass for a mixed library.
 
     1. Strip YouTube junk tags
     2. Collect files whose tags are missing or look wrong (well-tagged files are left alone)
     3. LLM-retag those files (no filename regex)
-    4. Embed cover art (fix_art_folder), unless fix_art=False
-    5. Move well-tagged files into ORGANIZED_DIR (organize_library), unless organize=False
+    4. Lyrics: plain lyrics into the tag + synced .lrc sidecar (LRCLIB), unless lyrics=False
+    5. Embed cover art (fix_art_folder), unless fix_art=False
+    6. Move well-tagged files into ORGANIZED_DIR (organize_library), unless organize=False
     Skips the organized/ folder.
+
+    fill_only (default: auto, True when folder is inside ORGANIZED_DIR): re-run
+    mode for an already-organized library, see fill_missing_folder.
     """
     folder = folder.resolve()
     if not folder.is_dir():
         print(f"not a directory: {folder}")
         return
+    if fill_only is None:
+        fill_only = _is_under_organized(folder)
+    if fill_only:
+        fill_missing_folder(folder, fix_art=fix_art, lyrics=lyrics)
+        return
 
     _retag_folder(folder, delete=delete)
 
+    if lyrics:
+        print("\n--- step 4: lyrics ---")
+        from lyrics import lyrics_folder
+        lyrics_folder(folder, files=_list_mp3s(folder))
     if fix_art:
-        print("\n--- step 4: fix art ---")
+        print("\n--- step 5: fix art ---")
         fix_art_folder(folder)
     if organize:
-        print("\n--- step 5: organize ---")
+        print("\n--- step 6: organize ---")
         organize_library(folder)
+
+
+def _fill_empty_tags(path: Path, meta: dict) -> list[str]:
+    """Write album / album artist / year / genre only where the tag is empty."""
+    from mutagen.mp3 import MP3
+    from mutagen.id3 import TALB, TPE2, TDRC, TCON
+    audio = MP3(path)
+    if audio.tags is None:
+        audio.add_tags()
+    t = audio.tags
+    filled = []
+    for key, cls, val in (("TALB", TALB, meta.get("album")), ("TPE2", TPE2, meta.get("album_artist")),
+                          ("TDRC", TDRC, meta.get("album_year")), ("TCON", TCON, meta.get("genre"))):
+        cur = t.get(key)
+        if val and not (cur and str(cur.text[0]).strip() if cur and cur.text else False):
+            t[key] = cls(encoding=3, text=str(val))
+            filled.append(key)
+    if filled:
+        audio.save()
+    return filled
+
+
+def fill_missing_folder(folder: Path, fix_art: bool = True, lyrics: bool = True):
+    """Re-run on an already-organized folder: only fill what is empty.
+
+    Never overwrites existing tags or art, never moves, renames or deletes
+    files, and does not call the LLM. Files need title + artist already.
+    1. album / album artist / year / genre from MusicBrainz -> Last.fm (empty tags only)
+    2. lyrics (tag + .lrc) where missing
+    3. cover art only for files with no embedded art
+    """
+    folder = folder.resolve()
+    print(f"fill-missing: {folder} (no moves, no overwrites)")
+    files = _list_mp3s(folder, include_organized=True)
+    print("\n--- fill empty tags ---")
+    n = 0
+    for f in files:
+        tags = _read_tags(f)
+        title, artist = tags["title"].strip(), tags["artist"].strip()
+        if not title or not artist or _has_all_basic(f):
+            continue
+        meta = {"title": title, "artist": artist, "album": tags["album"] or None, "file": f.name}
+        try:
+            meta = enrich(meta)
+        except Exception as e:
+            print(f"  enrich failed for {f.name}: {e}")
+            continue
+        meta.setdefault("album_artist", None)
+        if _is_invalid_album(meta.get("album")):
+            meta["album"] = None
+        try:
+            got = _fill_empty_tags(f, meta)
+        except Exception as e:
+            print(f"  tag write failed for {f.name}: {e}")
+            continue
+        if got:
+            n += 1
+            print(f"  filled {','.join(got)}: {f.name}")
+    print(f"filled tags in {n} files")
+    if lyrics:
+        print("\n--- lyrics (missing only) ---")
+        from lyrics import lyrics_folder
+        lyrics_folder(folder, files=files)
+    if fix_art:
+        print("\n--- cover art (files without art only) ---")
+        fix_art_folder(folder, include_organized=True, keep_existing=True)
+
+
+def _has_all_basic(path: Path) -> bool:
+    """True when album, year and genre tags are all present."""
+    try:
+        from mutagen.mp3 import MP3
+        t = MP3(path).tags or {}
+        return all(t.get(k) and t[k].text and str(t[k].text[0]).strip() for k in ("TALB", "TDRC", "TCON"))
+    except Exception:
+        return True
 
 
 def _retag_folder(folder: Path, delete: bool | None = None):
@@ -1702,6 +1796,9 @@ def main():
                     help="one-pass for mixed folders: clean junk, LLM on missing+wrong tags, then fix-art and organize")
     ap.add_argument("--no-fix-art", action="store_true", help="with --process: skip the fix-art step")
     ap.add_argument("--no-organize", action="store_true", help="with --process: skip the organize step")
+    ap.add_argument("--no-lyrics", action="store_true", help="with --process / DIR: skip the lyrics step")
+    ap.add_argument("--fill-only", action="store_true",
+                    help="only fill empty tags/lyrics/art; no moves or overwrites (auto inside ORGANIZED_DIR)")
     ap.add_argument("--no-delete", action="store_true",
                     help="with --process: do not move non-music/伴奏/DJ files to DELETE_DIR (still writes the candidates list)")
     ap.add_argument("--build-aliases", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
@@ -1751,7 +1848,8 @@ def main():
         return
     if args.process:
         process_folder(Path(args.process), fix_art=not args.no_fix_art, organize=not args.no_organize,
-                       delete=False if args.no_delete else None)
+                       delete=False if args.no_delete else None,
+                       lyrics=not args.no_lyrics, fill_only=True if args.fill_only else None)
         return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))
@@ -1772,7 +1870,8 @@ def main():
     # default: one-pass process on DIR (or MUSIC_DIR)
     process_folder(Path(args.folder) if args.folder else MUSIC_DIR,
                    fix_art=not args.no_fix_art, organize=not args.no_organize,
-                   delete=False if args.no_delete else None)
+                   delete=False if args.no_delete else None,
+                       lyrics=not args.no_lyrics, fill_only=True if args.fill_only else None)
 
 if __name__ == "__main__":
     main()
