@@ -10,6 +10,32 @@ That one command runs: junk-tag cleanup -> metadata (title rules / local LLM + M
 
 Tests: `python -m unittest discover -s tests -t .` (mocked HTTP, no network). Everything lives in flat Python modules and is set up in `config.py`.
 
+## Standalone tagging app
+
+`tag_music.py` (console command `tag-music`) wraps `main.process_folder`: point it at a folder of MP3s and it runs tagging only (title rules + local LLM, MusicBrainz with Last.fm fallback, cover art for the Vroom player, dedup + organize). No downloading, no Spotify. Pure Python, works on Windows, macOS and Linux.
+
+Windows (cmd / Anaconda Prompt):
+
+```bat
+cd C:\path\to\yt-music-pipeline
+pip install -r requirements.txt
+copy config_local.example.py config_local.py
+python tag_music.py "D:\Music\to-tag"
+python tag_music.py "D:\Music\to-tag" --no-organize      &REM tag in place only
+```
+
+macOS / Linux:
+
+```bash
+pip install -r requirements.txt && cp config_local.example.py config_local.py
+python tag_music.py ~/Music/to-tag
+pip install -e . && tag-music ~/Music/to-tag --no-fix-art   # optional console command
+```
+
+Options: `FOLDER` (default `MUSIC_DIR`), `--no-fix-art`, `--no-organize`, `--no-delete`, `--help`.
+
+It needs, in `config_local.py` next to the code: `LLM_BASE_URL` / `LLM_MODEL` for a local OpenAI-compatible LLM (e.g. vLLM, LM Studio, Ollama), `ORGANIZED_DIR` / `DELETE_DIR` set to Windows paths on Windows (e.g. `Path(r"D:\Music\organized")`; the defaults are Linux paths), optionally `LASTFM_API_KEY` (genre + fallback album/cover) and `MB_CONTACT`. MusicBrainz and Cover Art Archive need no key. `python main.py FOLDER` does the same thing.
+
 ## Requirements
 
 - Python 3.10+ (the code uses `X | None` type hints)

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yt-music-pipeline"
+version = "0.2.0"
+description = "Standalone MP3 tagging app: MusicBrainz + Last.fm metadata, dedup, cover art"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.31", "rapidfuzz>=3.0", "Pillow>=10.0", "mutagen>=1.47", "openai>=1.0", "musicbrainzngs>=0.7"]
+
+[project.optional-dependencies]
+chinese = ["opencc-python-reimplemented>=0.1.7"]
+
+[project.scripts]
+tag-music = "tag_music:main"
+
+[tool.setuptools]
+py-modules = ["artist_aliases", "artist_seed", "artwork", "config", "dedup", "deletion", "local_db", "lyrics", "main", "match_guard", "mb_cache_builder", "metadata_sources", "musicbrainz", "parse_meta", "regex_parser", "tag_music", "title_rules"]
