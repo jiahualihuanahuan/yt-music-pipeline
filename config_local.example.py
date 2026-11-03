@@ -7,8 +7,6 @@ from pathlib import Path
 
 # Metadata sources (empty = source skipped)
 LASTFM_API_KEY = ""          # https://www.last.fm/api/account/create
-SPOTIFY_CLIENT_ID = ""       # https://developer.spotify.com/dashboard (client credentials)
-SPOTIFY_CLIENT_SECRET = ""
 MB_CONTACT = "you@example.com"   # MusicBrainz asks for a contact in the User-Agent
 
 # LLM

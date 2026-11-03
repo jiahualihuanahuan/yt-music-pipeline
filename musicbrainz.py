@@ -72,8 +72,8 @@ def _proper_case(name: str, db_display: str | None = None) -> str:
 def enrich(meta):
     """Return meta enriched with canonical artist, album, year, genre, cover_url.
 
-    Precedence: local MB cache -> live MusicBrainz -> Spotify -> Last.fm
-    -> iTunes -> Deezer. Later sources only fill fields still missing.
+    Precedence: local MB cache -> live MusicBrainz (+ Cover Art Archive)
+    -> Last.fm -> iTunes -> Deezer. Later sources only fill fields still missing.
     """
     meta = _enrich_core(meta)
     try:
@@ -135,11 +135,12 @@ def _enrich_core(meta):
                                 if normalize(t.get("title", "")) == norm_t and not meta.get("album"):
                                     meta["album"] = rel.get("title")
                                     meta["album_year"] = rel_year
+                                    meta["mb_release_id"] = rel.get("id")
                 conn.commit()
                 if meta.get("album"):
                     return meta
 
-        # 3b. Spotify, then Last.fm (album/year/genre/cover; only fill gaps)
+        # 3b. Last.fm (album/year/genre/cover; only fill gaps)
         if not meta.get("album"):
             supplement(meta)
             if meta.get("album"):

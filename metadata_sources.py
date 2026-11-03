@@ -1,11 +1,11 @@
-"""Extra metadata sources: Spotify (client-credentials) and Last.fm (API key).
+"""Extra metadata sources used after MusicBrainz: Last.fm (API key) and
+Cover Art Archive (MusicBrainz cover art, no key).
 
-Both are optional. Each lookup returns a dict with any of
+lastfm_lookup returns a dict with any of
   artist, title, album, year, genres (list[str]), cover_url
 or None when the key is missing, nothing matched, or the call failed.
 Results are cached in memory per (title, artist); calls are rate-limited.
 """
-import base64
 import threading
 import time
 import requests
@@ -13,15 +13,14 @@ import requests
 import config as cfg
 from match_guard import accept
 
-SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
-SPOTIFY_API = "https://api.spotify.com/v1"
+MB_API = "https://musicbrainz.org/ws/2"
+CAA_API = "https://coverartarchive.org"
 LASTFM_API = "https://ws.audioscrobbler.com/2.0/"
 
 _lock = threading.Lock()
-_last_call = {"spotify": 0.0, "lastfm": 0.0}
-_MIN_INTERVAL = {"spotify": 0.2, "lastfm": 0.25}  # Last.fm asks for <=5 req/s
+_last_call = {"lastfm": 0.0, "caa": 0.0, "musicbrainz": 0.0}
+_MIN_INTERVAL = {"lastfm": 0.25, "caa": 0.2, "musicbrainz": 1.1}  # Last.fm <=5 req/s, MB 1 req/s
 _cache: dict = {}
-_token = {"value": None, "expires": 0.0}
 
 
 def _norm(s: str) -> str:
@@ -38,74 +37,56 @@ def _throttle(src: str):
 
 def clear_cache():
     _cache.clear()
-    _token.update(value=None, expires=0.0)
 
 
-# ---------------- Spotify ----------------
-def _spotify_token() -> str | None:
-    cid = getattr(cfg, "SPOTIFY_CLIENT_ID", "")
-    secret = getattr(cfg, "SPOTIFY_CLIENT_SECRET", "")
-    if not cid or not secret:
+# ---------------- Cover Art Archive (MusicBrainz) ----------------
+def caa_cover_url(release_id: str | None) -> str | None:
+    """Front cover URL from the Cover Art Archive for a MusicBrainz release id, or None."""
+    if not release_id:
         return None
-    if _token["value"] and time.time() < _token["expires"] - 30:
-        return _token["value"]
-    auth = base64.b64encode(f"{cid}:{secret}".encode()).decode()
-    r = requests.post(SPOTIFY_TOKEN_URL, data={"grant_type": "client_credentials"},
-                      headers={"Authorization": f"Basic {auth}"}, timeout=10)
-    r.raise_for_status()
-    j = r.json()
-    _token.update(value=j["access_token"], expires=time.time() + int(j.get("expires_in", 3600)))
-    return _token["value"]
+    key = ("caa", release_id)
+    if key in _cache:
+        return _cache[key]
+    url = f"{CAA_API}/release/{release_id}/front-500"
+    out = None
+    try:
+        _throttle("caa")
+        r = requests.head(url, allow_redirects=True, timeout=10,
+                          headers={"User-Agent": getattr(cfg, "USER_AGENT", "music-pipeline")})
+        out = url if r.status_code < 400 else None
+    except Exception:
+        out = None
+    _cache[key] = out
+    return out
 
 
-def _spotify_get(path: str, params=None, token=None):
-    _throttle("spotify")
-    r = requests.get(f"{SPOTIFY_API}{path}", params=params,
-                     headers={"Authorization": f"Bearer {token}"}, timeout=10)
-    if r.status_code == 429:
-        time.sleep(min(int(r.headers.get("Retry-After", "1")), 10))
-        _throttle("spotify")
-        r = requests.get(f"{SPOTIFY_API}{path}", params=params,
-                         headers={"Authorization": f"Bearer {token}"}, timeout=10)
-    r.raise_for_status()
-    return r.json()
-
-
-def spotify_lookup(title: str, artist: str) -> dict | None:
+def musicbrainz_cover_lookup(title: str, artist: str) -> str | None:
+    """Search MusicBrainz recordings for title+artist; return a Cover Art Archive URL."""
     if not title or not artist:
         return None
-    key = ("spotify", _norm(title), _norm(artist))
+    key = ("mbcover", _norm(title), _norm(artist))
     if key in _cache:
         return _cache[key]
     out = None
     try:
-        token = _spotify_token()
-        if not token:
-            return None  # no keys: don't cache, config may change
-        data = _spotify_get("/search", {"q": f"track:{title} artist:{artist}", "type": "track", "limit": 5}, token)
-        items = (data.get("tracks") or {}).get("items") or []
-        hit = next((t for t in items
-                    if any(accept(title, artist, t.get("name", ""), a.get("name", "")) for a in t.get("artists", []))),
-                   None)
-        if hit:
-            alb = hit.get("album") or {}
-            imgs = sorted(alb.get("images") or [], key=lambda i: -(i.get("width") or 0))
-            out = {
-                "artist": hit["artists"][0].get("name"),
-                "title": hit.get("name"),
-                "album": alb.get("name") if alb.get("album_type") != "compilation" else None,
-                "year": (alb.get("release_date") or "")[:4] or None,
-                "cover_url": imgs[0]["url"] if imgs else None,
-                "genres": [],
-            }
-            aid = hit["artists"][0].get("id")
-            if aid:
-                try:
-                    out["genres"] = _spotify_get(f"/artists/{aid}", None, token).get("genres") or []
-                except Exception:
-                    pass
+        _throttle("musicbrainz")
+        r = requests.get(f"{MB_API}/recording", params={
+            "query": f'recording:"{title}" AND artist:"{artist}"', "fmt": "json", "limit": 5,
+        }, headers={"User-Agent": f"{getattr(cfg, 'USER_AGENT', 'music-pipeline')} ({getattr(cfg, 'MB_CONTACT', '')})"},
+            timeout=15)
+        r.raise_for_status()
+        for rec in r.json().get("recordings") or []:
+            credit = " ".join(c.get("name", "") for c in rec.get("artist-credit") or [] if isinstance(c, dict))
+            if not accept(title, artist, rec.get("title", ""), credit):
+                continue
+            for rel in rec.get("releases") or []:
+                out = caa_cover_url(rel.get("id"))
+                if out:
+                    break
+            if out:
+                break
     except Exception as e:
-        print(f"spotify lookup failed ({artist} - {title}): {e}")
+        print(f"musicbrainz cover lookup failed ({artist} - {title}): {e}")
         out = None
     _cache[key] = out
     return out
@@ -153,28 +134,33 @@ def lastfm_lookup(title: str, artist: str) -> dict | None:
 
 
 def supplement(meta: dict) -> dict:
-    """Fill missing album/year/genre/cover_url from Spotify, then Last.fm.
+    """Fill missing album/year/genre/cover_url after MusicBrainz.
 
-    Never overwrites values already set (MusicBrainz / local DB win).
+    Order: MusicBrainz (already applied by musicbrainz.enrich) -> Cover Art
+    Archive (cover for the matched MB release) -> Last.fm (album, genre tags,
+    cover). Never overwrites values already set.
     """
     title = meta.get("title")
     artist = meta.get("artist_canonical") or meta.get("artist")
     if not title or not artist or meta.get("is_music") is False:
         return meta
-    for src_name, fn in (("spotify", spotify_lookup), ("lastfm", lastfm_lookup)):
-        need = [k for k in ("album", "album_year", "genre", "cover_url") if not meta.get(k)]
-        if not need:
-            break
-        res = fn(title, artist)
-        if not res:
-            continue
-        if not meta.get("album") and res.get("album"):
-            meta["album"] = res["album"]
-            meta.setdefault("album_source", src_name)
-        if not meta.get("album_year") and res.get("year"):
-            meta["album_year"] = res["year"]
-        if not meta.get("genre") and res.get("genres"):
-            meta["genre"] = res["genres"][0].title()
-        if not meta.get("cover_url") and res.get("cover_url"):
-            meta["cover_url"] = res["cover_url"]
+    if not meta.get("cover_url") and meta.get("mb_release_id"):
+        url = caa_cover_url(meta["mb_release_id"])
+        if url:
+            meta["cover_url"] = url
+    need = [k for k in ("album", "album_year", "genre", "cover_url") if not meta.get(k)]
+    if not need:
+        return meta
+    res = lastfm_lookup(title, artist)
+    if not res:
+        return meta
+    if not meta.get("album") and res.get("album"):
+        meta["album"] = res["album"]
+        meta.setdefault("album_source", "lastfm")
+    if not meta.get("album_year") and res.get("year"):
+        meta["album_year"] = res["year"]
+    if not meta.get("genre") and res.get("genres"):
+        meta["genre"] = res["genres"][0].title()
+    if not meta.get("cover_url") and res.get("cover_url"):
+        meta["cover_url"] = res["cover_url"]
     return meta

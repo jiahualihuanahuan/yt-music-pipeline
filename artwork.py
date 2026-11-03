@@ -22,14 +22,14 @@ def process_cover(src: Path, dst: Path):
 
 
 def fetch_cover_url(title: str, artist: str) -> str | None:
-    """Return a cover URL: Spotify, then iTunes, then Deezer, then Last.fm."""
+    """Return a cover URL: MusicBrainz/Cover Art Archive, then iTunes, then Deezer, then Last.fm."""
     if not title or not artist:
         return None
     import requests
-    from metadata_sources import spotify_lookup, lastfm_lookup
-    sp = spotify_lookup(title, artist)
-    if sp and sp.get("cover_url"):
-        return sp["cover_url"]
+    from metadata_sources import musicbrainz_cover_lookup, lastfm_lookup
+    mb = musicbrainz_cover_lookup(title, artist)
+    if mb:
+        return mb
     q = f"{artist} {title}"
     # iTunes
     try:
