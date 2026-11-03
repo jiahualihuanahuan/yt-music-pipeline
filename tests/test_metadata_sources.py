@@ -148,3 +148,12 @@ class RegexRemovedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoDownloadTest(unittest.TestCase):
+    def test_no_youtube_download(self):
+        self.assertFalse((ROOT / "search_download.py").exists())
+        src = (ROOT / "main.py").read_text()
+        for bad in ("search_download", "run_parallel", "--skip-dl", "--url"):
+            self.assertNotIn(bad, src)
+        self.assertNotIn("yt-dlp", (ROOT / "requirements.txt").read_text())

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Music pipeline orchestrator.
 
+Works only on MP3s that are already on disk (no YouTube search/download).
+
 Usage:
-  python main.py                              # full run (download + post-process in parallel)
-  python main.py --dry-run                    # search + parse only, no downloads
-  python main.py --skip-dl                    # skip download phase, process existing staging
+  python main.py /path/to/music               # recommended: same as --process DIR
+  python main.py                              # same, on MUSIC_DIR from config
   python main.py --reprocess /path/to/music   # retag all MP3s in folder (in place)
   python main.py --fill-missing /path/to/music # only retag files missing title/artist/album
   python main.py --llm-only /path/to/music    # force LLM inference only (overwrite tags, no regex)
@@ -23,25 +24,19 @@ Usage:
 import argparse
 import json
 import shutil
-import threading
-import time
 import re
 import unicodedata
 from pathlib import Path
 from datetime import datetime
-import glob
 from config import (
-    STAGING_DIR, PROCESSED_DIR, LOG_DIR, DRY_RUN,
+    LOG_DIR,
     LLM_BATCH_SIZE, MUSIC_DIR, ORGANIZED_DIR, BASE_DIR,
 )
-from search_download import main as run_downloads
-from parse_meta import parse_one, apply_llm_batch, finalize_allowlist, parse_all
+from parse_meta import parse_one, apply_llm_batch, finalize_allowlist
 from musicbrainz import enrich
 from lyrics import fetch_lyrics
-from dedup import dedup, is_duplicate
 from artwork import process_cover, fetch_cover_url, download_cover
 from local_db import init_db, stats
-from search_download import main as run_downloads, download_url
 
 CHANNEL_NOISE = {
     "official", "channel", "topic", "vevo", "music", "records", "entertainment",
@@ -217,14 +212,6 @@ def _parse_filename_artist_title(stem: str) -> tuple[str, str] | None:
     return left, right
 
 
-def _cleanup_staging_sidecars(mp3_src: Path):
-    """Remove leftover yt-dlp thumbnail and .info.json files from staging/."""
-    for ext in (".jpg", ".jpeg", ".webp", ".png", ".info.json", ".mp3.jpg", ".mp3.webp"):
-        cand = mp3_src.with_name(mp3_src.stem + ext)
-        if cand.exists():
-            cand.unlink(missing_ok=True)
-
-
 def _folder_fallback(path: Path) -> dict:
     """If file is under Artist/Album/Title.mp3, use folder names as fallback."""
     parent = path.parent.name if path.parent else ""
@@ -330,217 +317,6 @@ def _write_tags(
         audio.save()
     except Exception as e:
         print(f"tag write failed for {path.name}: {e}")
-
-
-def organize_one(meta):
-    """Move one staged file into Processed/Artist/Album/<original_youtube_name>.mp3
-    Filename is never renamed. Only folder and ID3 tags change.
-    Items the LLM flagged as non-music are left in staging (see NON_MUSIC_ACTION).
-    """
-    if meta.get("is_music") is False:
-        src = STAGING_DIR / meta.get("file", "")
-        if src.exists():
-            _handle_non_music(src, meta)
-        return None
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    src = STAGING_DIR / meta["file"]
-    if not src.exists():
-        return None
-
-    title = meta.get("title") or src.stem
-    artist = _clean_artist(meta.get("artist_canonical") or meta.get("artist") or "Unknown")
-    album = meta.get("album") or meta.get("folder_album") or title
-    if _is_invalid_album(album):
-        album = title
-    album_artist = meta.get("album_artist") or artist
-
-    meta["title"] = title
-    meta["artist_canonical"] = artist
-    meta["album"] = album
-    meta["album_artist"] = album_artist
-
-    safe = lambda s: "".join(c for c in s if c not in '/\\:*?"<>|').strip() or "Unknown"
-    dest_dir = PROCESSED_DIR / safe(artist) / safe(album)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    # Strictly preserve original YouTube filename
-    dest = dest_dir / src.name
-    if src.resolve() != dest.resolve():
-        shutil.move(str(src), str(dest))
-
-    # Process cover art before cleaning up staging sidecars
-    thumb = src.with_suffix(".jpg")
-    if not thumb.exists():
-        thumb = Path(str(src) + ".jpg")
-    cover_dst = dest_dir / "cover.jpg"
-    used_remote = False
-    if meta.get("cover_url") and not cover_dst.exists():
-        raw_cover = dest_dir / ".cover_raw.jpg"
-        if download_cover(meta["cover_url"], raw_cover):
-            used_remote = process_cover(raw_cover, cover_dst)
-        raw_cover.unlink(missing_ok=True)
-    if thumb.exists() and not used_remote:
-        process_cover(thumb, cover_dst)
-
-    _cleanup_staging_sidecars(src)
-
-    lyrics_text = None
-    try:
-        lyrics_text = fetch_lyrics(title, artist, album)
-    except Exception as e:
-        print(f"lyrics failed for {dest.name}: {e}")
-
-    _write_tags(
-        dest,
-        title=title,
-        artist=artist,
-        album=album,
-        album_artist=album_artist,
-        featured=meta.get("featured"),
-        year=meta.get("album_year"),
-        cover_path=cover_dst if cover_dst.exists() else None,
-        lyrics=lyrics_text,
-        genre=meta.get("genre"),
-    )
-
-    meta["processed_path"] = str(dest)
-    sidecar = dest.with_suffix(".json")
-    sidecar.write_text(json.dumps({
-        "raw_youtube_title": meta.get("raw"),
-        "original_filename": src.name,
-        "title": title,
-        "artist": meta.get("artist"),
-        "featured": meta.get("featured"),
-        "artist_canonical": artist,
-        "album": album,
-        "album_artist": album_artist,
-        "album_year": meta.get("album_year"),
-        "confidence": meta.get("confidence"),
-        "llm_notes": meta.get("llm_notes"),
-    }, ensure_ascii=False, indent=1), encoding="utf-8")
-    return meta
-
-
-def _process_ready(meta, kept, organized, lock):
-    """Enrich + incremental dedup + organize one ready file."""
-    try:
-        meta = enrich(meta)
-    except Exception as e:
-        print(f"enrich failed for {meta.get('file')}: {e}")
-
-    if _is_invalid_album(meta.get("album")):
-        meta["album"] = meta.get("title") or "Unknown"
-
-    with lock:
-        if is_duplicate(meta, kept):
-            print(f"dedup skip: {meta.get('file')}")
-            src = STAGING_DIR / meta["file"]
-            if src.exists():
-                src.unlink(missing_ok=True)
-            _cleanup_staging_sidecars(src)
-            return
-        kept.append(meta)
-
-    result = organize_one(meta)
-    if result:
-        with lock:
-            organized.append(result)
-        print(f"organized: {meta.get('artist_canonical') or meta.get('artist')} - {meta.get('title')}")
-
-
-def _is_file_ready(mp3_path: Path) -> bool:
-    """Ensure yt-dlp has completely finished extracting audio, converting thumbnails,
-    and writing metadata before the watcher thread moves the MP3 out of staging/.
-    """
-    stem = mp3_path.stem
-    parent = mp3_path.parent
-    # If any yt-dlp temporary or unconverted thumbnail file exists for this stem, wait
-    for p in parent.glob(f"{glob.escape(stem)}*"):
-        if p.suffix.lower() in (".part", ".ytdl", ".webp", ".webm", ".m4a", ".opus", ".temp"):
-            return False
-        if ".temp." in p.name:
-            return False
-    try:
-        size1 = mp3_path.stat().st_size
-        time.sleep(0.3)
-        size2 = mp3_path.stat().st_size
-        return size1 == size2 and size1 > 0
-    except OSError:
-        return False
-
-
-def _watch_and_process(stop_event: threading.Event, organized: list, lock: threading.Lock):
-    seen = set()
-    llm_buf = []
-    all_parsed = []
-    kept = []
-
-    def flush_llm():
-        nonlocal llm_buf
-        if not llm_buf:
-            return
-        apply_llm_batch(llm_buf)
-        for m in llm_buf:
-            _process_ready(m, kept, organized, lock)
-        llm_buf = []
-
-    STAGING_DIR.mkdir(parents=True, exist_ok=True)
-    # Keep running while downloads are active OR while unseen MP3s remain in staging
-    while not stop_event.is_set() or any(f.name not in seen for f in STAGING_DIR.glob("*.mp3")):
-        new_files = []
-        for f in STAGING_DIR.glob("*.mp3"):
-            if f.name not in seen and _is_file_ready(f):
-                new_files.append(f)
-
-        for f in new_files:
-            seen.add(f.name)
-            meta = parse_one(f)
-            # MusicBrainz album first when we have title+artist
-            if meta.get("title") and meta.get("artist"):
-                meta = _enrich_album_first(meta)
-            all_parsed.append(meta)
-            print(f"parsed: {f.name}  album={meta.get('album')}  needs_llm={meta.get('needs_llm')}")
-            if meta.get("needs_llm"):
-                llm_buf.append(meta)
-                if len(llm_buf) >= LLM_BATCH_SIZE:
-                    flush_llm()
-            else:
-                _process_ready(meta, kept, organized, lock)
-
-        time.sleep(1.5 if not stop_event.is_set() else 0.5)
-
-    flush_llm()
-    finalize_allowlist(all_parsed)
-
-    # Clean up any orphaned thumbnails/json from failed downloads where no .mp3 exists
-    for sidecar in STAGING_DIR.iterdir():
-        if sidecar.suffix.lower() in (".jpg", ".jpeg", ".webp", ".png", ".json", ".part", ".ytdl"):
-            mp3_sibling = sidecar.with_suffix(".mp3")
-            if not mp3_sibling.exists():
-                sidecar.unlink(missing_ok=True)
-
-def run_parallel(target_url: str | None = None):
-    stop_event = threading.Event()
-    organized = []
-    lock = threading.Lock()
-
-    worker = threading.Thread(
-        target=_watch_and_process,
-        args=(stop_event, organized, lock),
-        daemon=True,
-    )
-    worker.start()
-
-    try:
-        if target_url:
-            download_url(target_url)
-        else:
-            run_downloads()
-    finally:
-        stop_event.set()
-
-    worker.join(timeout=900)
-    return organized
 
 
 def _folder_fallback(path: Path) -> dict:
@@ -1896,8 +1672,8 @@ def dump_tags_folder(folder: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--skip-dl", action="store_true")
+    ap.add_argument("folder", nargs="?", metavar="DIR",
+                    help="run the full process (metadata, dedup, art, organize) on DIR (default: MUSIC_DIR)")
     ap.add_argument("--reprocess", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help=f"reparse + retag all MP3s under DIR (default: {MUSIC_DIR})")
     ap.add_argument("--fill-missing", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
@@ -1933,8 +1709,6 @@ def main():
     ap.add_argument("--merge-artists", nargs="?", const=str(ORGANIZED_DIR), type=str, metavar="DIR",
                     help="apply ARTIST_ALIASES_FILE: retag artist and move files to the canonical folder (dry run unless --apply)")
     ap.add_argument("--apply", action="store_true", help="with --merge-artists: actually retag and move")
-    ap.add_argument("--url", "--playlist", dest="url", type=str, metavar="URL",
-                help="download and process only a specific YouTube playlist or video URL")
     args = ap.parse_args()
 
     # Always try to init the local DB (path is now platform-safe)
@@ -1995,43 +1769,10 @@ def main():
         reprocess_folder(Path(args.reprocess), only_missing=False)
         return
 
-    if args.dry_run:
-        import config as cfg
-        cfg.DRY_RUN = True
-
-    if args.skip_dl or args.dry_run:
-        results = parse_all()
-        enriched = []
-        for meta in results:
-            try:
-                enriched.append(enrich(meta))
-            except Exception as e:
-                print(f"enrich failed for {meta.get('file')}: {e}")
-                enriched.append(meta)
-        kept = dedup(enriched)
-        organized = []
-        for m in kept:
-            r = organize_one(m)
-            if r:
-                organized.append(r)
-    else:
-        organized = run_parallel(target_url=args.url)
-
-    summary = {
-        "run_at": datetime.now().isoformat(),
-        "organized": len(organized),
-        "high_confidence": sum(1 for m in organized if m.get("confidence") == "high"),
-        "llm_used": sum(1 for m in organized if m.get("llm_notes") is not None),
-    }
-    print(json.dumps(summary, indent=1, ensure_ascii=False))
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        (LOG_DIR / f"run_{datetime.now():%Y%m%d_%H%M%S}.json").write_text(
-            json.dumps(summary, indent=1, ensure_ascii=False), encoding="utf-8"
-        )
-    except OSError:
-        pass
-
+    # default: one-pass process on DIR (or MUSIC_DIR)
+    process_folder(Path(args.folder) if args.folder else MUSIC_DIR,
+                   fix_art=not args.no_fix_art, organize=not args.no_organize,
+                   delete=False if args.no_delete else None)
 
 if __name__ == "__main__":
     main()
