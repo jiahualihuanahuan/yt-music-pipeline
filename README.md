@@ -183,6 +183,20 @@ python main.py --merge-artists /srv/music/organized --apply  # retag artist + mo
 
 Spellings are grouped by their Chinese name (Traditional/Simplified-insensitive); an English-only name joins only when exactly one Chinese name is seen with it in a bilingual credit. Multi-artist credits and junk ("A - Title", `【】`) are never merged. Canonical = the bilingual form if one exists, Simplified Chinese spelling preferred, then the most used; with no Simplified spelling the name is converted to Simplified (artist names only, titles keep their script). If the file exists, `--build-aliases` writes `*.proposed.json` instead, so your edits are kept. `--merge-artists` never overwrites: same content at the destination is reported as `dupe-skip`, a different file gets a `_<n>` suffix. `--organize` also applies the map.
 
+### Near-duplicate songs (`dedup.py`)
+
+Same song = same artist **and** title tag (case/width/punctuation-insensitive) **and** durations within `DEDUP_DURATION_TOLERANCE` (default 2.5 s). Missing tags or a bigger duration gap = not a duplicate (accuracy first). Better copy = higher bitrate, then more/longer tags, then larger file.
+
+- `--organize` / `--process`: when the target name exists and the incoming file is a near-duplicate, the better copy keeps the canonical name and the other is moved to `DELETE_DIR` (logged in `logs/delete_candidates_<ts>.csv`). Different songs that only share a filename still get `<stem>_<size>.mp3`. Byte-identical copies are still removed as before. With `--no-delete` / `DELETE_ENABLED = False` nothing is quarantined and the suffix fallback is used.
+- Clean up copies already in the library (separate explicit command, never part of fill-only):
+
+```bash
+python main.py --dedup /srv/music/organized          # dry run (default): logs/dedup_<ts>.csv, nothing moved
+python main.py --dedup /srv/music/organized --apply  # move losers to DELETE_DIR; a `_<digits>` winner takes back the freed canonical name
+```
+
+Review `DELETE_DIR` and the CSVs, then delete by hand.
+
 ### Evaluating the prompt on your library
 
 ```bash
@@ -210,7 +224,7 @@ Items the LLM is still unsure about get a second pass with web-search context fr
 
 ## Library mode
 
-Each flag takes an optional `DIR` (default `MUSIC_DIR`) and works recursively on `*.mp3` files, skipping hidden files. Only **one** command runs per call. If several are given, the first one in this order wins: `--dump-tags`, `--clean-junk`, `--from-filename`, `--needs-tag`, `--fix-art`, `--organize`, `--fix-wrong`, `--build-aliases`, `--merge-artists`, `--process`, `--llm-only`, `--remove-tags`, `--lyrics`, `--fill-missing`; otherwise the positional `DIR` (default `~/Music`) runs the full process.
+Each flag takes an optional `DIR` (default `MUSIC_DIR`) and works recursively on `*.mp3` files, skipping hidden files. Only **one** command runs per call. If several are given, the first one in this order wins: `--dump-tags`, `--clean-junk`, `--from-filename`, `--needs-tag`, `--fix-art`, `--organize`, `--fix-wrong`, `--build-aliases`, `--dedup`, `--merge-artists`, `--process`, `--llm-only`, `--remove-tags`, `--lyrics`, `--fill-missing`; otherwise the positional `DIR` (default `~/Music`) runs the full process.
 
 Commands marked "skips organized" ignore files under `ORGANIZED_DIR`.
 
@@ -230,6 +244,7 @@ Commands marked "skips organized" ignore files under `ORGANIZED_DIR`.
 | `--lyrics [DIR]` | Add LRCLIB lyrics (USLT) to files that already have title+artist. |
 | `--dump-tags [DIR]` | Write every file's ID3 frames to `logs/dump_tags_<ts>.txt`. |
 | `--build-aliases [DIR]` | Propose a duplicate-artist map, see [Duplicate artist folders](#duplicate-artist-folders). |
+| `--dedup [DIR] [--apply]` | Find near-duplicate songs; dry run unless `--apply`, which moves losers to `DELETE_DIR`. Default DIR is `ORGANIZED_DIR`. |
 | `--merge-artists [DIR] [--apply]` | Merge duplicate artist spellings (dry run unless `--apply`). Default DIR is `ORGANIZED_DIR`. |
 
 `--fill-missing`, `--llm-only`, `--remove-tags`, `--lyrics` and `--dump-tags` use their own `rglob` and **do not** skip `ORGANIZED_DIR`.
