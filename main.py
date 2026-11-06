@@ -1563,7 +1563,8 @@ def fix_wrong_folder(folder: Path):
 
 
 def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, delete: bool | None = None,
-                   lyrics: bool = True, fill_only: bool | None = None, reprocess: bool = False):
+                   lyrics: bool = True, fill_only: bool | None = None, reprocess: bool = False,
+                   dedup: bool = True):
     """One-pass for a mixed library.
 
     1. Strip YouTube junk tags
@@ -1572,6 +1573,7 @@ def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, de
     4. Lyrics: plain lyrics into the tag + synced .lrc sidecar (LRCLIB), unless lyrics=False
     5. Embed cover art (fix_art_folder), unless fix_art=False
     6. Move well-tagged files into ORGANIZED_DIR (organize_library), unless organize=False
+    7. Dedup by title+artist (dedup_folder), unless dedup=False
     Skips the organized/ folder.
 
     fill_only (default: auto, True when folder is inside ORGANIZED_DIR): re-run
@@ -1596,6 +1598,10 @@ def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, de
         if organize and not _is_under_organized(folder):
             print("\n--- organize ---")
             organize_library(folder)
+        if dedup:
+            print("\n--- dedup ---")
+            target = ORGANIZED_DIR if (organize and ORGANIZED_DIR.exists()) else folder
+            dedup_folder(target)
         return
     if fill_only is None:
         fill_only = _is_under_organized(folder)
@@ -1615,6 +1621,11 @@ def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, de
     if organize:
         print("\n--- step 6: organize ---")
         organize_library(folder)
+    if dedup:
+        print("\n--- step 7: dedup ---")
+        # Dedup the organized library if we just moved into it, else the folder itself
+        target = ORGANIZED_DIR if (organize and ORGANIZED_DIR.exists()) else folder
+        dedup_folder(target)
 
 
 def _fill_empty_tags(path: Path, meta: dict) -> list[str]:
@@ -1898,6 +1909,7 @@ def main():
                     help="one-pass for mixed folders: clean junk, LLM on missing+wrong tags, then fix-art and organize")
     ap.add_argument("--no-fix-art", action="store_true", help="with --process: skip the fix-art step")
     ap.add_argument("--no-organize", action="store_true", help="with --process: skip the organize step")
+    ap.add_argument("--no-dedup", action="store_true", help="with --process: skip the dedup step")
     ap.add_argument("--no-lyrics", action="store_true", help="with --process / DIR: skip the lyrics step")
     ap.add_argument("--fill-only", action="store_true",
                     help="only fill empty tags/lyrics/art; no moves or overwrites (auto inside ORGANIZED_DIR)")
@@ -1955,7 +1967,7 @@ def main():
         process_folder(Path(args.process), fix_art=not args.no_fix_art, organize=not args.no_organize,
                        delete=False if args.no_delete else None,
                        lyrics=not args.no_lyrics, fill_only=True if args.fill_only else None,
-                       reprocess=args.reprocess)
+                       reprocess=args.reprocess, dedup=not args.no_dedup)
         return
     if args.llm_only:
         llm_only_folder(Path(args.llm_only))
