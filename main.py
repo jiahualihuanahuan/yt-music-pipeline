@@ -17,6 +17,7 @@ Usage:
   python main.py --needs-tag [DIR]            # Phase 3: list files that still need work
   python main.py --fix-art [DIR]              # embed good cover art (local or fetch)
   python main.py --organize [DIR]             # move well-tagged files to organized/Artist/Album/
+  python main.py --dedup [DIR]                # remove duplicate tracks (same title+artist)
   python main.py --fix-wrong [DIR]            # retag files whose tags disagree with the filename
   python main.py --process [DIR]              # one-pass: clean, retag, fix-art, organize (recommended)
   python main.py --process [DIR] --no-fix-art --no-organize  # retag only
@@ -1158,6 +1159,81 @@ def _remove_empty_dirs(root: Path) -> int:
     return removed
 
 
+
+def _norm_key(s: str) -> str:
+    """Lowercase, strip punctuation and extra spaces for grouping."""
+    import re
+    s = (s or "").lower().strip()
+    s = re.sub(r"[^\w\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\s]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _has_numeric_suffix(name: str) -> bool:
+    import re
+    return bool(re.search(r"_\d+\.mp3$", name, re.I))
+
+
+def dedup_folder(folder: Path):
+    """Remove duplicate tracks under folder.
+
+    Groups by normalized title + artist. Keeps the best file:
+    1. has MusicBrainz ID
+    2. no numeric suffix in the filename
+    3. larger file size
+    Deletes the rest. Skips files missing title or artist.
+    """
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+
+    print(f"dedup: scanning {folder} ...")
+    all_mp3s = _list_mp3s(folder)
+    print(f"found {len(all_mp3s)} MP3s")
+
+    groups = {}
+    skipped = 0
+    for f in all_mp3s:
+        tags = _read_tags(f)
+        title = (tags.get("title") or "").strip()
+        artist = (tags.get("artist") or "").strip()
+        if not title or not artist or artist.lower() in INVALID_ARTISTS:
+            skipped += 1
+            continue
+        key = (_norm_key(artist), _norm_key(title))
+        groups.setdefault(key, []).append(f)
+
+    deleted = 0
+    kept = 0
+    for key, files in groups.items():
+        if len(files) < 2:
+            kept += 1
+            continue
+
+        def score(p: Path) -> tuple:
+            has_mb = _has_musicbrainz(p)
+            no_suffix = not _has_numeric_suffix(p.name)
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            return (has_mb, no_suffix, size)
+
+        files.sort(key=score, reverse=True)
+        winner = files[0]
+        kept += 1
+        for loser in files[1:]:
+            try:
+                loser.unlink()
+                deleted += 1
+                print(f"  deleted: {loser.name}")
+                print(f"    kept:  {winner.name}")
+            except Exception as e:
+                print(f"  delete failed for {loser.name}: {e}")
+
+    print(f"done: kept={kept} deleted={deleted} skipped_untagged={skipped}")
+
+
 def organize_library(folder: Path):
     """Move well-tagged files into ORGANIZED_DIR/Artist/Album/filename.mp3.
 
@@ -1811,6 +1887,8 @@ def main():
                     help=f"embed good cover art (keep existing, local image, or fetch) (default: {MUSIC_DIR})")
     ap.add_argument("--organize", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help=f"move well-tagged files to {ORGANIZED_DIR}/Artist/Album/ (dedupe, clean empty dirs)")
+    ap.add_argument("--dedup", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
+                    help="remove duplicate tracks (same title+artist); keep best copy")
     ap.add_argument("--fix-wrong", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
                     help="retag files whose tags disagree with the filename or look noisy")
     ap.add_argument("--process", nargs="?", const=str(MUSIC_DIR), type=str, metavar="DIR",
@@ -1857,6 +1935,9 @@ def main():
         return
     if args.organize:
         organize_library(Path(args.organize))
+        return
+    if args.dedup:
+        dedup_folder(Path(args.dedup))
         return
     if args.fix_wrong:
         fix_wrong_folder(Path(args.fix_wrong))
