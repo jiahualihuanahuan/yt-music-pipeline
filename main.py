@@ -1180,7 +1180,7 @@ def dedup_folder(folder: Path):
     1. has MusicBrainz ID
     2. no numeric suffix in the filename
     3. larger file size
-    Deletes the rest. Skips files missing title or artist.
+    Deletes the rest. Scans organized/ when you point it there.
     """
     folder = folder.resolve()
     if not folder.is_dir():
@@ -1188,12 +1188,13 @@ def dedup_folder(folder: Path):
         return
 
     print(f"dedup: scanning {folder} ...")
-    all_mp3s = _list_mp3s(folder)
+    # Always include organized so --dedup /path/to/organized works
+    all_mp3s = _list_mp3s(folder, include_organized=True)
     print(f"found {len(all_mp3s)} MP3s")
 
     groups = {}
     skipped = 0
-    for f in all_mp3s:
+    for i, f in enumerate(all_mp3s, 1):
         tags = _read_tags(f)
         title = (tags.get("title") or "").strip()
         artist = (tags.get("artist") or "").strip()
@@ -1202,6 +1203,8 @@ def dedup_folder(folder: Path):
             continue
         key = (_norm_key(artist), _norm_key(title))
         groups.setdefault(key, []).append(f)
+        if i % 2000 == 0:
+            print(f"  scanned {i}/{len(all_mp3s)} ...")
 
     deleted = 0
     kept = 0
