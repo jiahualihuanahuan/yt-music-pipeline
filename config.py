@@ -261,7 +261,8 @@ ARTIST_ALIASES_FILE = BASE_DIR / "artist_aliases.json"
 COVER_ARTIST = "performer"
 
 # ---------- Dedup ----------
-DEDUP_THRESHOLD = 85  # rapidfuzz score on "title + artist"; >= this = duplicate
+DEDUP_THRESHOLD = 85  # legacy (unused)
+DEDUP_DURATION_TOLERANCE = 2.5  # seconds; same artist+title within this = near-duplicate (dedup.py)
 
 # ---------- LLM (vLLM OpenAI-compatible endpoint) ----------
 LLM_BASE_URL = "http://192.168.86.35:8001/v1"

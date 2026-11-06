@@ -1271,6 +1271,45 @@ def organize_library(folder: Path):
     import config as _cfg
     import artist_aliases
     aliases = artist_aliases.load(getattr(_cfg, "ARTIST_ALIASES_FILE", BASE_DIR / "artist_aliases.json"))
+    # Near-duplicate losers go to DELETE_DIR (quarantine + CSV), never deleted.
+    own_run = None
+    run = _DELETE_RUN
+    if run is None:
+        from deletion import DeleteRun
+        own_run = run = DeleteRun(ORGANIZED_DIR, Path(getattr(_cfg, "DELETE_DIR", BASE_DIR / "_to_delete")),
+                                  LOG_DIR, getattr(_cfg, "DELETE_ENABLED", True))
+    try:
+        moved, dupes, skipped = _organize_files(all_mp3s, size_index, aliases, run)
+    finally:
+        if own_run is not None and own_run.candidates:
+            own_run.write_logs()
+    empty_src = _remove_empty_dirs(folder)
+    empty_org = _remove_empty_dirs(ORGANIZED_DIR)
+    print(f"done: moved={moved} dupes_removed={dupes} skipped={skipped} empty_dirs_removed={empty_src + empty_org}")
+
+
+def _resolve_near_duplicate(incoming: Path, existing: Path, run) -> str:
+    """incoming would land on existing's name. Returns:
+    "incoming_lost"  - near-dup, existing is better (or tie); incoming quarantined
+    "replaced"       - near-dup, incoming is better; existing quarantined (name now free)
+    "different"      - not a near-duplicate (or quarantine disabled) -> caller uses suffix name
+    """
+    import dedup
+    a, b = dedup.audio_info(existing), dedup.audio_info(incoming)
+    if not dedup.is_near_duplicate(a, b):
+        return "different"
+    if dedup.better(a, b) is a:
+        if run.consider(incoming, f"near-duplicate of {existing}", "high"):
+            print(f"  near-dupe kept existing: {existing.name}")
+            return "incoming_lost"
+        return "different"
+    if run.consider(existing, f"near-duplicate replaced by better copy {incoming.name}", "high"):
+        print(f"  near-dupe replaced with better copy: {existing.name}")
+        return "replaced"
+    return "different"
+
+
+def _organize_files(all_mp3s, size_index, aliases, run):
     moved = 0
     dupes = 0
     skipped = 0
@@ -1321,7 +1360,13 @@ def organize_library(folder: Path):
         clean_stem = title_rules.VIDEO_ID_RE.sub("", f.stem).strip() or f.stem
         dest = dest_dir / f"{clean_stem}{f.suffix}"
         if dest.exists():
-            dest = dest_dir / f"{f.stem}_{size}{f.suffix}"
+            res = _resolve_near_duplicate(f, dest, run)
+            if res == "incoming_lost":
+                dupes += 1
+                continue
+            if res != "replaced" and dest.exists():
+                # genuinely different song (or undecidable): keep both, distinct name
+                dest = dest_dir / f"{f.stem}_{size}{f.suffix}"
 
         try:
             import shutil
@@ -1338,10 +1383,23 @@ def organize_library(folder: Path):
 
         if i % 500 == 0:
             print(f"  processed {i}/{len(all_mp3s)} (moved={moved} dupes={dupes})")
+    return moved, dupes, skipped
 
-    empty_src = _remove_empty_dirs(folder)
-    empty_org = _remove_empty_dirs(ORGANIZED_DIR)
-    print(f"done: moved={moved} dupes_removed={dupes} skipped={skipped} empty_dirs_removed={empty_src + empty_org}")
+
+def dedup_folder(folder: Path, apply: bool = False):
+    """Scan folder (default ORGANIZED_DIR) for near-duplicates; quarantine losers only when apply."""
+    import config as _cfg
+    import dedup
+    from deletion import DeleteRun
+    folder = folder.resolve()
+    if not folder.is_dir():
+        print(f"not a directory: {folder}")
+        return
+    run = DeleteRun(folder, Path(getattr(_cfg, "DELETE_DIR", BASE_DIR / "_to_delete")), LOG_DIR, enabled=apply)
+    dedup.scan_folder(folder, run, LOG_DIR, apply=apply)
+    run.write_logs()
+    if not apply:
+        print("dry run: nothing moved. Re-run with --apply to quarantine losers.")
 
 
 
@@ -1919,7 +1977,10 @@ def main():
                     help="propose a duplicate-artist map from tags under DIR and write ARTIST_ALIASES_FILE (if absent; else *.proposed.json)")
     ap.add_argument("--merge-artists", nargs="?", const=str(ORGANIZED_DIR), type=str, metavar="DIR",
                     help="apply ARTIST_ALIASES_FILE: retag artist and move files to the canonical folder (dry run unless --apply)")
-    ap.add_argument("--apply", action="store_true", help="with --merge-artists: actually retag and move")
+    ap.add_argument("--dedup", nargs="?", const=str(ORGANIZED_DIR), type=str, metavar="DIR",
+                    help="find near-duplicates (same artist+title, similar duration) under DIR (default ORGANIZED_DIR); "
+                         "dry run unless --apply, which moves losers to DELETE_DIR")
+    ap.add_argument("--apply", action="store_true", help="with --merge-artists / --dedup: actually make changes")
     args = ap.parse_args()
 
     # Always try to init the local DB (path is now platform-safe)
@@ -1959,6 +2020,9 @@ def main():
         return
     if args.build_aliases:
         build_aliases_folder(Path(args.build_aliases))
+        return
+    if args.dedup:
+        dedup_folder(Path(args.dedup), apply=args.apply)
         return
     if args.merge_artists:
         merge_artists_folder(Path(args.merge_artists), apply=args.apply)
