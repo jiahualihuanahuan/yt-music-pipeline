@@ -264,7 +264,7 @@ COVER_ARTIST = "performer"
 DEDUP_THRESHOLD = 85  # rapidfuzz score on "title + artist"; >= this = duplicate
 
 # ---------- LLM (Ollama OpenAI-compatible endpoint) ----------
-# vLLM alternative: LLM_BASE_URL = "http://192.168.86.35:11434/v1"  # Ollama, LLM_MODEL = "qwen3.5-9b"
+# vLLM alternative: LLM_BASE_URL = "http://192.168.86.35:8001/v1", LLM_MODEL = "qwen3.5-9b"
 LLM_BASE_URL = "http://192.168.86.35:11434/v1"  # Ollama
 LLM_API_KEY = ""            # Ollama needs no key
 LLM_MODEL = "qwen3.5:9b"   # Ollama tag (ollama pull qwen3.5:9b)
