@@ -266,7 +266,7 @@ DEDUP_THRESHOLD = 85  # rapidfuzz score on "title + artist"; >= this = duplicate
 # ---------- LLM (vLLM OpenAI-compatible endpoint) ----------
 LLM_BASE_URL = "http://192.168.86.35:8001/v1"
 LLM_API_KEY = "vllm-secret-key"
-LLM_MODEL = "Qwen/Qwen3-8B-AWQ"  # must match the model name served by vLLM
+LLM_MODEL = "qwen3.5-9b"  # must match vLLM --served-model-name (model: cyankiwi/Qwen3.5-9B-AWQ-4bit)
 LLM_TIMEOUT = None         # no timeout; let local model finish
 LLM_BATCH_SIZE = 15        # short titles; 3080 10GB + 9B Q4 has ~3GB headroom
 LLM_RETRIES = 2            # retry failed batches

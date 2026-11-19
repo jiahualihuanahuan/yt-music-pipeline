@@ -72,7 +72,7 @@ BASE_DIR = Path("/data/yt-music")                 # working data root
 MUSIC_DIR = Path("/srv/music")                     # default DIR for library-mode flags
 ORGANIZED_DIR = Path("/srv/music-organized")       # target of --organize / --process
 LLM_BASE_URL = "http://localhost:8001/v1"
-LLM_MODEL = "Qwen/Qwen3-8B-AWQ"
+LLM_MODEL = "qwen3.5-9b"
 LASTFM_API_KEY = "..."
 BROWSER_COOKIES = "firefox"                        # or None to disable the fallback
 ```
@@ -201,7 +201,7 @@ Filenames the title rules don't accept (and files picked out by the library mode
 |---|---|
 | `LLM_BASE_URL` | `http://192.168.86.35:8001/v1` |
 | `LLM_API_KEY` | `vllm-secret-key` (sent as a Bearer token if set) |
-| `LLM_MODEL` | `Qwen/Qwen3-8B-AWQ` |
+| `LLM_MODEL` | `qwen3.5-9b` (vLLM `--served-model-name`; model `cyankiwi/Qwen3.5-9B-AWQ-4bit`) |
 | `LLM_TIMEOUT` | `None` (no timeout) |
 | `LLM_BATCH_SIZE` | `15` |
 | `LLM_RETRIES` | `2` |

@@ -12,7 +12,7 @@ MB_CONTACT = "you@example.com"   # MusicBrainz asks for a contact in the User-Ag
 # LLM
 # LLM_BASE_URL = "http://localhost:8001/v1"
 # LLM_API_KEY = ""
-# LLM_MODEL = "Qwen/Qwen3-8B-AWQ"
+# LLM_MODEL = "qwen3.5-9b"
 # USE_REGEX_PARSER = False
 # USE_TITLE_RULES = True        # high-precision pre-filter; False = everything to the LLM
 # NON_MUSIC_ACTION = "delete"   # "skip" | "move" | "delete" (= move to DELETE_DIR)
