@@ -58,7 +58,10 @@ NON_MUSIC_DIR = Path("/mnt/data/docker/navidrome/non_music")
 AUDIO_FORMAT = "mp3"
 AUDIO_QUALITY = "320"          # VBR ~320k
 MIN_DURATION = 90              # seconds; filters shorts/trailers
-MAX_DURATION = 600             # seconds; filters long mixes/lives
+MAX_DURATION = 600             # seconds; filters long mixes/lives (download side)
+# Tracks longer than this (seconds) are moved to DELETE_DIR during --process.
+# Typical song ~3-5 min; 10 min covers most singles while catching compilations.
+MAX_SONG_DURATION = 600
 MAX_PLAYLIST_ITEMS = 1       # max downloads per search query
 SEARCH_RESULTS = 1            # ytsearchN: how many results to inspect
 SEARCH_SLEEP = 1               # seconds between YouTube searches
@@ -241,12 +244,15 @@ NON_MUSIC_ACTION = "delete"
 # "delete" never removes anything: files are MOVED into DELETE_DIR (relative path kept,
 # no overwrite) and logged to logs/deleted_<ts>.csv. Only LLM is_music=false with
 # confidence "high" is moved; lower confidence goes to logs/delete_candidates_<ts>.csv
-# as "review". 伴奏/karaoke and DJ versions are moved too (DELETE_VERSIONS).
+# as "review". 伴奏/karaoke versions are moved too (DELETE_VERSIONS).
+# Tracks longer than MAX_SONG_DURATION are also moved.
+# DJ versions / remixes / short livestream song clips are kept.
 # --process runs this by default; pass --no-delete (or DELETE_ENABLED=False) to only
 # write the candidates list.
 DELETE_ENABLED = True
 DELETE_DIR = BASE_DIR / "_to_delete"
 DELETE_VERSIONS = True
+MAX_SONG_DURATION = 600   # seconds; override here or in config_local.py
 
 # Covers: also store the original singer in TXXX:ORIGINAL_ARTIST (artist stays the performer).
 WRITE_ORIGINAL_ARTIST = True

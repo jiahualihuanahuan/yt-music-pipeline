@@ -1707,7 +1707,8 @@ def _has_all_basic(path: Path) -> bool:
 def _retag_folder(folder: Path, delete: bool | None = None):
     """Steps 1-3 of process_folder (tag cleanup + LLM on missing/wrong).
 
-    delete: move unwanted files (non-music high confidence, 伴奏, DJ) to DELETE_DIR.
+    delete: move unwanted files (non-music high confidence, 伴奏, tracks longer than
+    MAX_SONG_DURATION) to DELETE_DIR. DJ versions / remixes are kept.
     None = config DELETE_ENABLED. False = only write the candidates list.
     """
     global _DELETE_RUN
@@ -1727,14 +1728,20 @@ def _retag_folder(folder: Path, delete: bool | None = None):
 
 
 def _version_candidates(files: list[Path]) -> list[Path]:
-    """Send 伴奏/karaoke and DJ versions to the delete run; return the files that remain."""
+    """Send 伴奏 and overly long tracks to the delete run; return the files that remain.
+
+    DJ versions / remixes / short livestream clips are kept.
+    """
     import config as _cfg
-    from deletion import version_reason
+    from deletion import version_reason, is_too_long
     if _DELETE_RUN is None or not getattr(_cfg, "DELETE_VERSIONS", True):
         return files
+    max_sec = float(getattr(_cfg, "MAX_SONG_DURATION", 600))
     keep = []
     for f in files:
         why = version_reason(f.stem, _read_tags(f).get("title") or "")
+        if not why and is_too_long(f, max_sec):
+            why = f"too_long (>{int(max_sec)}s)"
         if why and _DELETE_RUN.consider(f, why, "high"):
             continue
         keep.append(f)
@@ -1749,7 +1756,7 @@ def _retag_folder_inner(folder: Path):
 
     # Filename regex (from_filename_folder) is no longer run here: it wrote
     # confident wrong tags that then skipped the LLM. See tests/eval_regex.py.
-    print("\n--- step 2: collect missing + wrong (伴奏/DJ versions -> delete dir) ---")
+    print("\n--- step 2: collect missing + wrong (伴奏 / long tracks -> delete dir) ---")
     all_mp3s = _version_candidates(_list_mp3s(folder))
     need = []
     for f in all_mp3s:

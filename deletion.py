@@ -1,10 +1,11 @@
 """Reversible "delete": move unwanted files into DELETE_DIR (never unlink).
 
-Jenny's policy:
+Jenny's policy (updated):
   - non-music (LLM is_music=false, confidence high)  -> moved
   - non-music with lower confidence                 -> review list only, not moved
-  - 伴奏 / instrumental-karaoke and DJ versions     -> moved
-  - livestream song clips (直播歌切, 歌回, live stream) -> moved
+  - 伴奏 / instrumental-karaoke (backing tracks)     -> moved
+  - tracks longer than MAX_SONG_DURATION (default 10 min) -> moved
+  - DJ versions, remixes, short livestream song clips  -> KEPT (they are still songs)
 Every run writes logs/delete_candidates_<ts>.csv (path, reason, confidence, action)
 and every move is logged to logs/deleted_<ts>.csv (src, dest, reason). Moves keep the
 path relative to the scanned root and never overwrite (a numeric suffix is added).
@@ -24,34 +25,35 @@ _INSTRUMENTAL_RE = re.compile(
 _HAS_VOCAL_RE = re.compile(r"うた入り|歌入り|带唱|帶唱|原唱版|花絮|彩排", re.I)
 # quoted lyrics may contain the word 伴奏
 _QUOTED_RE = re.compile(r"『[^』]*』|「[^」]*」")
-# DJ remix versions ("DJ版", "DJ0.9降速版", "(DJ抖音版)", "- DJ Remix"), not artists like "DJ Snake".
-_DJ_RE = re.compile(
-    r"DJ\s*[\w.]{0,12}版|[(（\[【]\s*DJ|\s[-–]\s*DJ(?:\s*(?:remix|mix|版|\d)|\s*$)|DJ\s*(?:remix|抖音|降速|加速|慢摇|慢搖|热播|熱播)",
-    re.I,
-)
-
-
-# Livestream song clips (Jenny: not music -> delete). Only clearly marked ones.
-_LIVESTREAM_RE = re.compile(
-    r"直播歌切|直播切片|直播片段|直播回放|直播唱|直播间|直播間|歌切|(?<!非)歌回|歌枠|"
-    r"live\s*stream|livestream|\b(?:twitch|bilibili)\s*(?:live|直播)|[【\[(（]\s*直播\s*[】\])）]",
-    re.I,
-)
 
 
 def version_reason(*texts: str) -> str | None:
-    """'livestream' / 'instrumental' / 'dj' if any text (filename stem, title tag) marks such a version."""
+    """Return 'instrumental' if any text marks a backing-track version. DJ/remix/livestream kept."""
     for t in texts:
         if not t:
             continue
         t = _QUOTED_RE.sub(" ", t)
-        if _LIVESTREAM_RE.search(t):
-            return "livestream"
         if _INSTRUMENTAL_RE.search(t) and not _HAS_VOCAL_RE.search(t):
             return "instrumental"
-        if _DJ_RE.search(t):
-            return "dj"
     return None
+
+
+def duration_seconds(path: Path) -> float | None:
+    """Best-effort duration in seconds from the audio file. None on failure."""
+    try:
+        from mutagen.mp3 import MP3
+        audio = MP3(path)
+        if audio.info and audio.info.length:
+            return float(audio.info.length)
+    except Exception:
+        pass
+    return None
+
+
+def is_too_long(path: Path, max_seconds: float) -> bool:
+    """True if the file duration exceeds max_seconds."""
+    dur = duration_seconds(path)
+    return dur is not None and dur > max_seconds
 
 
 class DeleteRun:
@@ -77,7 +79,6 @@ class DeleteRun:
             dest = dest.with_name(f"{Path(rel).stem}_{n}{Path(rel).suffix}")
             n += 1
         return dest
-
     def consider(self, path: Path, reason: str, confidence: str = "high") -> bool:
         """Record a candidate; move it when enabled and confidence is high. True if moved."""
         move = self.enabled and confidence == "high"

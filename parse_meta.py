@@ -33,14 +33,19 @@ Input: a JSON array of items. Each item may have:
 - "web_search": optional web snippets, only on a second pass.
 
 Decide for every item:
-1. is_music: false for anything that is not a song: talk / interview / livestream clips,
-   vlogs, travel videos, news, podcasts, sports, school promo videos, cartoon episodes,
-   "NA". For non-music return title=null, artist=null, album=null, is_music=false and a
-   short reason in "notes". Never invent a song for it.
-   Songs ARE music: children's songs / nursery rhymes, TV-show stage performances (纯享,
-   Live), covers. Livestream clips are NOT music, even when a song is sung (直播歌切,
-   直播唱, 歌回, live stream): is_music=false, notes "livestream". Use confidence "high" for
-   is_music=false only when it is clearly not a song (non-music files get removed).
+1. is_music: false for anything that is not a single song: talk / interview / radio /
+   podcast / 电台 / 访谈 / 脱口秀 / lots of spoken dialogue, long compilations or mixes
+   of many songs (合集 / 全集 / 两小时 / 精选 / mix of many tracks), vlogs, travel videos,
+   news, sports, school promo videos, cartoon episodes, "NA".
+   If the content is mostly people talking rather than singing one song, mark
+   is_music=false with confidence "high" and a short reason in "notes"
+   (e.g. "talk clip", "radio show", "long compilation").
+   Never invent a song for non-music.
+   Songs ARE music (keep them): children's songs / nursery rhymes, TV-show stage
+   performances (纯享, Live), covers, DJ versions, remixes, slowed/reverb versions.
+   Short livestream song performances can stay as music if it is clearly one song.
+   Use confidence "high" for is_music=false only when it is clearly not a single song
+   (non-music files get removed).
    Soundtrack / Disney songs: artist = the real singer if you know it; only if unknown,
    use the movie/show as artist. Keep bilingual titles and artist aliases as written,
    e.g. "枕上書 Writings On Pillow", "某某(本名)".
