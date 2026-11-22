@@ -105,25 +105,83 @@ raw "Journey To Fansipan PART 1⧸ Vlog Review No. 367" folder "Top Songs of the
 raw "Spidey and His Amazing Friends： Panther Patience [sHSgwpzqKQY]"
 -> {"title":null,"artist":null,"featured":[],"original_artist":null,"album":null,"is_music":false,"confidence":"high","notes":"cartoon episode"}
 
-Respond with ONLY a valid JSON array (no markdown, no commentary), one object per item:
-[{"id":0,"title":...,"artist":...,"featured":[],"original_artist":...,"album":...,"is_music":true,"confidence":"high","notes":...}]
+STRICT OUTPUT RULES (must follow):
+- Return ONLY a valid JSON array. No markdown, no ```json, no explanation, no thinking tags, no extra text before or after.
+- is_music must be a boolean true or false (not the string "true"/"false").
+- featured must be a JSON array of strings (use [] if none). Never a string.
+- confidence must be exactly one of: "high", "medium", "low".
+- notes must be a short string or null. Keep it under 40 characters.
+- Do not invent fields. Echo the "id" unchanged.
+- If you are unsure, still return a complete object with is_music=true and confidence="low".
+
+Respond with ONLY the JSON array:
+[{"id":0,"title":"...","artist":"...","featured":[],"original_artist":null,"album":null,"is_music":true,"confidence":"high","notes":null}]
 """
 
 _THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 _JSON_ARRAY_RE = re.compile(r"\[[\s\S]*\]")
+_FULLWIDTH_QUOTES = str.maketrans("“”‘’", '""\'\'')
+
+
+def _clean_llm_text(text: str) -> str:
+    """Strip thinking tags, markdown fences, and common full-width punctuation that breaks JSON."""
+    cleaned = _THINK_RE.sub("", text or "").strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    cleaned = cleaned.translate(_FULLWIDTH_QUOTES)
+    # Common Chinese punctuation that sometimes appears inside JSON
+    cleaned = cleaned.replace("，", ",").replace("：", ":")
+    return cleaned
 
 
 def _extract_json_array(text: str) -> list:
-    cleaned = _THINK_RE.sub("", text).strip()
-    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    cleaned = _clean_llm_text(text)
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         m = _JSON_ARRAY_RE.search(cleaned)
         if m:
-            return json.loads(m.group(0))
-        raise
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+        # Last resort: try to fix trailing commas
+        fixed = re.sub(r",\s*([}\]])", r"\1", cleaned)
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            raise
+
+
+def _coerce_llm_item(item: dict) -> dict:
+    """Normalize common type mistakes from small local models."""
+    if not isinstance(item, dict):
+        return {}
+    # is_music: accept bool, "true"/"false", 1/0
+    im = item.get("is_music")
+    if isinstance(im, str):
+        item["is_music"] = im.strip().lower() in ("true", "1", "yes")
+    elif isinstance(im, (int, float)):
+        item["is_music"] = bool(im)
+    elif im is None:
+        item["is_music"] = True  # default safe
+    # featured must be a list
+    feat = item.get("featured")
+    if isinstance(feat, str):
+        item["featured"] = [x.strip() for x in re.split(r"[,，、/]", feat) if x.strip()]
+    elif not isinstance(feat, list):
+        item["featured"] = []
+    # confidence
+    conf = str(item.get("confidence") or "").strip().lower()
+    if conf not in ("high", "medium", "low"):
+        item["confidence"] = "medium" if conf else "low"
+    else:
+        item["confidence"] = conf
+    # notes short
+    notes = item.get("notes")
+    if isinstance(notes, str) and len(notes) > 80:
+        item["notes"] = notes[:77] + "..."
+    return item
 
 
 def _searxng_search(query: str, max_results: int = 3) -> list[dict]:
@@ -223,9 +281,14 @@ def _call_llm(batch: list[dict], use_search: bool = False) -> list[dict] | None:
                 print(f"LLM HTTP {r.status_code}: {body}")
             r.raise_for_status()
             content = r.json()["choices"][0]["message"]["content"]
-            parsed = _extract_json_array(content)
+            try:
+                parsed = _extract_json_array(content)
+            except Exception as e:
+                print(f"LLM JSON parse failed (attempt {attempt}): {e}")
+                print(f"  raw snippet: {content[:400]!r}")
+                raise
             if isinstance(parsed, list):
-                return parsed
+                return [_coerce_llm_item(x) if isinstance(x, dict) else {} for x in parsed]
         except Exception as e:
             last_err = e
             print(f"LLM batch attempt {attempt}/{LLM_RETRIES} failed: {e}")
