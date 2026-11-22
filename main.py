@@ -1579,7 +1579,8 @@ def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, de
     fill_only (default: auto, True when folder is inside ORGANIZED_DIR): re-run
     mode for an already-organized library, see fill_missing_folder.
     reprocess=True: full re-run on every file (organized too), overwriting
-    tags, lyrics and cover art; then organize as usual.
+    tags, lyrics and cover art. Also applies the same deletion rules
+    (伴奏 and tracks longer than MAX_SONG_DURATION) as normal --process.
     """
     folder = folder.resolve()
     if not folder.is_dir():
@@ -1587,7 +1588,20 @@ def process_folder(folder: Path, fix_art: bool = True, organize: bool = True, de
         return
     if reprocess:
         print(f"reprocess: full re-tag of every file under {folder} (overwrites tags, lyrics, art)")
-        reprocess_folder(folder, only_missing=False)
+        # Same deletion rules as normal --process: 伴奏 + overly long tracks
+        import config as _cfg
+        from deletion import DeleteRun
+        global _DELETE_RUN
+        enabled = getattr(_cfg, "DELETE_ENABLED", True) if delete is None else delete
+        _DELETE_RUN = DeleteRun(folder, Path(getattr(_cfg, "DELETE_DIR", BASE_DIR / "_to_delete")), LOG_DIR, enabled)
+        try:
+            print("--- pre-filter: 伴奏 / long tracks ---")
+            remaining = _version_candidates(_list_mp3s(folder, include_organized=True))
+            print(f"  {len(remaining)} files remain after pre-filter")
+            reprocess_folder(folder, only_missing=False)
+        finally:
+            _DELETE_RUN.write_logs()
+            _DELETE_RUN = None
         if lyrics:
             print("\n--- lyrics (overwrite) ---")
             from lyrics import lyrics_folder
